@@ -12,15 +12,15 @@ type Tx struct {
 	t *Table
 }
 
-func (x *Tx) Set(item Item) {
-	x.t.addLocked(item)
+func (x *Tx) Set(item Item) error {
+	return x.t.addLocked(item)
 }
 
-func (x *Tx) Get(key string) any {
+func (x *Tx) Get(key string) (any, error) {
 	return x.t.getLocked(key)
 }
 
-func (x *Tx) GetByFk(fk string) []Item {
+func (x *Tx) GetByFk(fk string) ([]Item, error) {
 	return x.t.getByFkLocked(fk)
 }
 
@@ -47,8 +47,8 @@ func (t *Table) NewSession(ctx context.Context, fn func(tx *Tx) error) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("session timed out: %w", ctx.Err())
-	case <-errChan:
-		return fmt.Errorf("session rollback: %w", ctx.Err())
+	case err := <-errChan:
+		return fmt.Errorf("session error: %w", err)
 	case <-done:
 		return nil
 	}

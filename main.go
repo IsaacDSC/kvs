@@ -11,27 +11,38 @@ import (
 func main() {
 	database := db.NewDB()
 	table := database.CreateTable("users")
-	table.Set(db.Item{Key: "1", Fk: "user_id", Value: "John Doe"})
-	table.Set(db.Item{Key: "2", Fk: "user_id", Value: "Jane Doe"})
+	if err := table.Set(db.Item{Key: "1", Fk: "user_id", Value: "John Doe"}); err != nil {
+		panic(err)
+	}
+	if err := table.Set(db.Item{Key: "2", Fk: "user_id", Value: "Jane Doe"}); err != nil {
+		panic(err)
+	}
 	fmt.Println(table.Get("1"))
 	fmt.Println(table.GetByFk("user_id"))
 	table.Delete("1")
 	fmt.Println(table.Get("1"))
 	fmt.Println(table.GetByFk("user_id"))
-	table.Set(db.Item{Key: "1", Fk: "user_id", Value: "John Doe"})
+	if err := table.Set(db.Item{Key: "1", Fk: "user_id", Value: "John Doe"}); err != nil {
+		panic(err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
 	err := table.NewSession(ctx, func(tx *db.Tx) error {
-		items := tx.GetByFk("user_id")
+		items, err := tx.GetByFk("user_id")
+		if err != nil {
+			return err
+		}
 		fmt.Println("items:", items)
 
 		time.Sleep(100 * time.Millisecond)
 		for _, item := range items {
 			n := item.Value.(string)
 			n = n + "!!!"
-			tx.Set(db.Item{Key: item.Key, Fk: item.Fk, Value: n})
+			if err := tx.Set(db.Item{Key: item.Key, Fk: item.Fk, Value: n}); err != nil {
+				return err
+			}
 		}
 
 		return nil

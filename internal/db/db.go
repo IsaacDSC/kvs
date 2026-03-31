@@ -18,7 +18,7 @@ func (db *DB) CreateTable(name string) *Table {
 	defer db.Lock.Unlock()
 	db.Tables[name] = &Table{
 		VirtualTable: VirtualTable{
-			Data: make(map[string]any),
+			Data: make(map[string][]byte),
 			Fk:   make(map[string][]string),
 		},
 		Session: make(map[int]VirtualTable),
