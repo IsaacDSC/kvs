@@ -104,6 +104,25 @@ func (t *Table) Delete(key string) {
 	t.deleteLocked(key)
 }
 
+// ExportMaps returns deep copies of Data and Fk for checkpointing.
+func (t *Table) ExportMaps() (data map[string][]byte, fk map[string][]string) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	data = make(map[string][]byte, len(t.Data))
+	for k, v := range t.Data {
+		vv := make([]byte, len(v))
+		copy(vv, v)
+		data[k] = vv
+	}
+	fk = make(map[string][]string, len(t.Fk))
+	for k, v := range t.Fk {
+		sl := make([]string, len(v))
+		copy(sl, v)
+		fk[k] = sl
+	}
+	return data, fk
+}
+
 func (t *Table) deleteLocked(key string) {
 	delete(t.Data, key)
 
