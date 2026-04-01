@@ -35,7 +35,7 @@ type Entry struct {
 	Table string // non-empty logical table name
 	Key   string
 	Fk    string
-	// ValueBytes is CBOR payload for Put; empty for Delete.
+	// ValueBytes is CBOR-encoded db.Item for Put (legacy WAL may hold only Value); empty for Delete.
 	ValueBytes []byte
 }
 

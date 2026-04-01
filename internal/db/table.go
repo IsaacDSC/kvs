@@ -4,6 +4,8 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/IsaacDSC/kvs/internal/code"
 )
 
@@ -17,22 +19,46 @@ type Table struct {
 	mu sync.RWMutex
 	VirtualTable
 	Session map[int]VirtualTable
+	name    string
+	durable DurableWriter
+
+	sessionOnce sync.Once
+	sessionSem  chan struct{}
 }
 
 type Item struct {
-	Key   string
-	Fk    string
-	Value any
+	Key     string
+	Fk      string
+	Value   any
+	Version string
 }
 
+func (t *Table) initSessionLock() {
+	t.sessionOnce.Do(func() {
+		t.sessionSem = make(chan struct{}, 1)
+		t.sessionSem <- struct{}{}
+	})
+}
+
+// Set inserts or updates item. If the DB is opened via store.Open, this records a WAL entry.
 func (t *Table) Set(item Item) error {
+	if t.durable != nil && t.name != "" {
+		return t.durable.Put(t.name, item)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.addLocked(item)
+}
+
+// ApplyPut updates memory only; used when replaying the WAL or after a WAL append inside the store.
+func (t *Table) ApplyPut(item Item) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.addLocked(item)
 }
 
 func (t *Table) addLocked(item Item) error {
-	b, err := code.Encode(item.Value)
+	b, err := code.Encode(item)
 	if err != nil {
 		return errors.Join(ErrEncodeValue, err)
 	}
@@ -46,22 +72,22 @@ func (t *Table) addLocked(item Item) error {
 	return nil
 }
 
-func (t *Table) Get(key string) (any, error) {
+func (t *Table) Get(key string) (Item, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.getLocked(key)
 }
 
-func (t *Table) getLocked(key string) (any, error) {
+func (t *Table) getLocked(key string) (Item, error) {
 	b, ok := t.Data[key]
 	if !ok {
-		return nil, ErrKeyNotFound
+		return Item{}, ErrKeyNotFound
 	}
-	v, err := code.Decode(b)
-	if err != nil {
-		return nil, errors.Join(ErrDecodeValue, err)
+	var item Item
+	if err := cbor.Unmarshal(b, &item); err != nil {
+		return Item{}, errors.Join(ErrDecodeValue, err)
 	}
-	return v, nil
+	return item, nil
 }
 
 func (t *Table) GetByFk(fk string) ([]Item, error) {
@@ -85,23 +111,32 @@ func (t *Table) getByFkLocked(fk string) ([]Item, error) {
 		if !ok {
 			continue
 		}
-		v, err := code.Decode(b)
-		if err != nil {
+		var item Item
+		if err := cbor.Unmarshal(b, &item); err != nil {
 			return nil, errors.Join(ErrDecodeValue, err)
 		}
-		items = append(items, Item{
-			Key:   key,
-			Value: v,
-			Fk:    fk,
-		})
+		items = append(items, item)
 	}
 	return items, nil
 }
 
-func (t *Table) Delete(key string) {
+// Delete removes key. If the DB is opened via store.Open, this records a WAL delete.
+func (t *Table) Delete(key string) error {
+	if t.durable != nil && t.name != "" {
+		return t.durable.Delete(t.name, key)
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.deleteLocked(key)
+	return nil
+}
+
+// ApplyDelete removes key from memory only; used when replaying the WAL or after a WAL append inside the store.
+func (t *Table) ApplyDelete(key string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.deleteLocked(key)
+	return nil
 }
 
 // ExportMaps returns deep copies of Data and Fk for checkpointing.

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/IsaacDSC/kvs/internal/db"
 	"github.com/IsaacDSC/kvs/internal/store"
@@ -56,4 +58,53 @@ func main() {
 	for _, name := range names {
 		fmt.Println("getByFk:", name)
 	}
+
+	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
+	err = table.NewSession(ctx, func(tx *db.Tx) error {
+		item, err := tx.Get("1")
+		if err != nil {
+			return err
+		}
+
+		// time.Sleep(15 * time.Second)
+		return tx.Set(item)
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	item, err := table.Get("1")
+	if err != nil {
+		panic(err)
+	}
+
+	item.Value = "Joahna Maria"
+	optCtx := context.Background()
+	result := table.OptimisticPut(optCtx, item, "1")
+	if err := result.Err(); err != nil {
+		panic(err)
+	}
+
+	item, err = table.Get("1")
+	if err != nil {
+		panic(err)
+	}
+
+	item.Version = "2"
+	item.Value = "Joahna Maria2"
+	result2 := table.OptimisticPut(optCtx, item, "3")
+	err = result2.Err()
+	if err != nil {
+		lastVersion, err := result2.GetLastVersion()
+		fmt.Println("expected error version mismatch:", lastVersion, err)
+		// panic(err)
+	}
+
+	it, err := table.Get("1")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("it:", it)
+
 }

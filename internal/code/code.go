@@ -11,7 +11,8 @@ func Encode(v any) ([]byte, error) {
 	return cbor.Marshal(v)
 }
 
-// Decode restores a value previously produced by Encode.
+// Decode restores a value previously produced by Encode into an arbitrary Go value
+// (maps decode as map[interface{}]interface{}). For db.Item bytes, unmarshal into Item instead.
 func Decode(data []byte) (any, error) {
 	var v any
 	if err := cbor.Unmarshal(data, &v); err != nil {

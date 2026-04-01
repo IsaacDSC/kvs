@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -55,12 +56,12 @@ func TestReopenRecoversPuts(t *testing.T) {
 	tb := s2.DB().GetOrCreateTable("users")
 	for i := 0; i < 20; i++ {
 		key := strconv.Itoa(i)
-		v, err := tb.Get(key)
+		item, err := tb.Get(key)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if v.(string) != key+"-v" {
-			t.Fatalf("key %s: got %v", key, v)
+		if item.Value.(string) != key+"-v" {
+			t.Fatalf("key %s: got %v", key, item.Value)
 		}
 	}
 }
@@ -89,9 +90,112 @@ func TestReopenRecoversDelete(t *testing.T) {
 	if _, err := tb.Get("a"); err == nil {
 		t.Fatal("a should be gone")
 	}
-	v, err := tb.Get("b")
-	if err != nil || v.(string) != "2" {
-		t.Fatalf("b: %v %v", v, err)
+	item, err := tb.Get("b")
+	if err != nil || item.Value.(string) != "2" {
+		t.Fatalf("b: %v %v", item.Value, err)
+	}
+}
+
+func TestOptimisticPutPersistsAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("t", db.Item{Key: "k", Fk: "f", Value: "before"}); err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.DB().GetOrCreateTable("t").Get("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.Value = "after"
+	tb := s.DB().GetOrCreateTable("t")
+	res := tb.OptimisticPut(context.Background(), item, "v1")
+	if err := res.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	got, err := s2.DB().GetOrCreateTable("t").Get("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Value.(string) != "after" || got.Version != "v1" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSessionPersistsAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("t", db.Item{Key: "k", Fk: "f", Value: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tb := s.DB().GetOrCreateTable("t")
+	err = tb.NewSession(ctx, func(tx *db.Tx) error {
+		it, err := tx.Get("k")
+		if err != nil {
+			return err
+		}
+		it.Value = "b"
+		return tx.Set(it)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	got, err := s2.DB().GetOrCreateTable("t").Get("k")
+	if err != nil || got.Value.(string) != "b" {
+		t.Fatalf("got %v err %v", got.Value, err)
+	}
+}
+
+func TestOptimisticDeletePersistsAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("t", db.Item{Key: "k", Fk: "f", Value: "x", Version: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	item := db.Item{Key: "k", Fk: "f", Value: "x", Version: "v1"}
+	tb := s.DB().GetOrCreateTable("t")
+	res := tb.OptimisticDelete(context.Background(), item)
+	if err := res.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if _, err := s2.DB().GetOrCreateTable("t").Get("k"); err == nil {
+		t.Fatal("key should be deleted after replay")
 	}
 }
 
@@ -120,9 +224,9 @@ func TestCorruptTailTruncatedOnOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	v, err := s2.DB().GetOrCreateTable("t").Get("k")
-	if err != nil || v.(string) != "v42" {
-		t.Fatalf("recovery failed: %v %v", v, err)
+	item, err := s2.DB().GetOrCreateTable("t").Get("k")
+	if err != nil || item.Value.(string) != "v42" {
+		t.Fatalf("recovery failed: %v %v", item.Value, err)
 	}
 }
 
@@ -231,7 +335,7 @@ func TestCheckpointSkipsEarlierWALOnReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	var extra int
-	switch x := ev.(type) {
+	switch x := ev.Value.(type) {
 	case int:
 		extra = x
 	case int64:
@@ -239,7 +343,7 @@ func TestCheckpointSkipsEarlierWALOnReplay(t *testing.T) {
 	case uint64:
 		extra = int(x)
 	default:
-		t.Fatalf("unexpected type %T for extra", ev)
+		t.Fatalf("unexpected type %T for extra", ev.Value)
 	}
 	if extra != 99 {
 		t.Fatalf("extra: got %d", extra)
@@ -263,10 +367,10 @@ func TestMultiTableIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	va, _ := s2.DB().GetOrCreateTable("a").Get("1")
-	vb, _ := s2.DB().GetOrCreateTable("b").Get("1")
-	if va.(string) != "a1" || vb.(string) != "b1" {
-		t.Fatalf("va=%v vb=%v", va, vb)
+	aItem, _ := s2.DB().GetOrCreateTable("a").Get("1")
+	bItem, _ := s2.DB().GetOrCreateTable("b").Get("1")
+	if aItem.Value.(string) != "a1" || bItem.Value.(string) != "b1" {
+		t.Fatalf("va=%v vb=%v", aItem.Value, bItem.Value)
 	}
 }
 
@@ -279,8 +383,8 @@ func TestDoubleReopenIdempotentState(t *testing.T) {
 	_ = s2.Close()
 	s3, _ := Open(dir, Options{Durability: SyncEveryWrite})
 	defer s3.Close()
-	v, err := s3.DB().GetOrCreateTable("t").Get("k")
-	if err != nil || v.(string) != "v" {
-		t.Fatalf("%v %v", v, err)
+	item, err := s3.DB().GetOrCreateTable("t").Get("k")
+	if err != nil || item.Value.(string) != "v" {
+		t.Fatalf("%v %v", item.Value, err)
 	}
 }

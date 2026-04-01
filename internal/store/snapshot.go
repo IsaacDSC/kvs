@@ -41,13 +41,7 @@ func loadCheckpoint(dir string, database *db.DB) (lastSeq uint64, err error) {
 	database.Lock.Lock()
 	defer database.Lock.Unlock()
 	for name, snap := range cf.Tables {
-		database.Tables[name] = &db.Table{
-			VirtualTable: db.VirtualTable{
-				Data: copyBytesMap(snap.Data),
-				Fk:   copyStringSliceMap(snap.Fk),
-			},
-			Session: make(map[int]db.VirtualTable),
-		}
+		database.Tables[name] = db.NewTableFromSnapshot(copyBytesMap(snap.Data), copyStringSliceMap(snap.Fk))
 	}
 	return cf.LastSeq, nil
 }

@@ -2,15 +2,20 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/fxamacker/cbor/v2"
 
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/db"
 )
 
 var ErrEmptyTableName = errors.New("store: empty table name")
+
+var _ db.DurableWriter = (*Store)(nil)
 
 // Store provides durable Put/Delete backed by a WAL under dir.
 type Store struct {
@@ -33,18 +38,34 @@ func maxUint64(a, b uint64) uint64 {
 	return b
 }
 
+// decodePutItem restores a Put payload. New records are CBOR of db.Item; older WAL
+// records store only Value (CBOR of any), with Key/Fk taken from the frame.
+func decodePutItem(e Entry) (db.Item, error) {
+	var item db.Item
+	if err := cbor.Unmarshal(e.ValueBytes, &item); err == nil && item.Key != "" {
+		if item.Key != e.Key || item.Fk != e.Fk {
+			return db.Item{}, fmt.Errorf("store: wal key/fk does not match item")
+		}
+		return item, nil
+	}
+	var v any
+	if err := cbor.Unmarshal(e.ValueBytes, &v); err != nil {
+		return db.Item{}, err
+	}
+	return db.Item{Key: e.Key, Fk: e.Fk, Value: v}, nil
+}
+
 func applyEntry(database *db.DB, e Entry) error {
 	t := database.GetOrCreateTable(e.Table)
 	switch e.Op {
 	case OpPut:
-		v, err := code.Decode(e.ValueBytes)
+		item, err := decodePutItem(e)
 		if err != nil {
 			return err
 		}
-		return t.Set(db.Item{Key: e.Key, Fk: e.Fk, Value: v})
+		return t.ApplyPut(item)
 	case OpDel:
-		t.Delete(e.Key)
-		return nil
+		return t.ApplyDelete(e.Key)
 	default:
 		return errors.New("store: unknown wal op")
 	}
@@ -81,22 +102,21 @@ func Open(dir string, opts Options) (*Store, error) {
 	}
 	s.LastReplayApplied = applied
 	s.nextSeq = maxUint64(cpSeq, maxSeq)
+	database.SetDurable(s)
 	return s, nil
 }
 
 func (s *Store) DB() *db.DB { return s.db }
 
-// Put appends to the WAL then updates memory.
-func (s *Store) Put(table string, item db.Item) error {
+// putLocked appends a Put to the WAL and updates memory. s.mu must be held.
+func (s *Store) putLocked(table string, item db.Item) error {
 	if table == "" {
 		return ErrEmptyTableName
 	}
-	b, err := code.Encode(item.Value)
+	b, err := code.Encode(item)
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	seq := s.nextSeq + 1
 	e := Entry{Seq: seq, Op: OpPut, Table: table, Key: item.Key, Fk: item.Fk, ValueBytes: b}
 	if err := s.wal.Append(e); err != nil {
@@ -104,16 +124,21 @@ func (s *Store) Put(table string, item db.Item) error {
 	}
 	s.nextSeq = seq
 	tb := s.db.GetOrCreateTable(table)
-	return tb.Set(item)
+	return tb.ApplyPut(item)
 }
 
-// Delete appends a delete record then updates memory.
-func (s *Store) Delete(table, key string) error {
+// Put appends to the WAL then updates memory.
+func (s *Store) Put(table string, item db.Item) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.putLocked(table, item)
+}
+
+// deleteLocked appends a delete to the WAL and updates memory. s.mu must be held.
+func (s *Store) deleteLocked(table, key string) error {
 	if table == "" {
 		return ErrEmptyTableName
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	seq := s.nextSeq + 1
 	e := Entry{Seq: seq, Op: OpDel, Table: table, Key: key}
 	if err := s.wal.Append(e); err != nil {
@@ -121,8 +146,14 @@ func (s *Store) Delete(table, key string) error {
 	}
 	s.nextSeq = seq
 	tb := s.db.GetOrCreateTable(table)
-	tb.Delete(key)
-	return nil
+	return tb.ApplyDelete(key)
+}
+
+// Delete appends a delete record then updates memory.
+func (s *Store) Delete(table, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteLocked(table, key)
 }
 
 // Checkpoint writes a snapshot including current nextSeq as LastSeq.

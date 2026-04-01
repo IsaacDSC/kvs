@@ -16,11 +16,11 @@ func TestTableSetGet(t *testing.T) {
 	if err := tb.Set(Item{Key: "k1", Fk: "f1", Value: "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	v, err := tb.Get("k1")
+	item, err := tb.Get("k1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s, _ := v.(string); s != "hello" {
+	if s, _ := item.Value.(string); s != "hello" {
 		t.Fatalf("got %q", s)
 	}
 	if _, err := tb.Get("missing"); !errors.Is(err, ErrKeyNotFound) {
@@ -59,7 +59,9 @@ func TestTableDelete(t *testing.T) {
 		Session: make(map[int]VirtualTable),
 	}
 	_ = tb.Set(Item{Key: "x", Fk: "g", Value: 42})
-	tb.Delete("x")
+	if err := tb.Delete("x"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := tb.Get("x"); !errors.Is(err, ErrKeyNotFound) {
 		t.Fatalf("after delete: %v", err)
 	}
@@ -79,9 +81,9 @@ func TestTableExportMapsDeepCopy(t *testing.T) {
 	_ = tb.Set(Item{Key: "k", Fk: "f", Value: "x"})
 	d, fk := tb.ExportMaps()
 	d["k"][0] = 'y'
-	v, _ := tb.Get("k")
-	if v.(string) != "x" {
-		t.Fatalf("ExportMaps mutated table: %v", v)
+	item, _ := tb.Get("k")
+	if item.Value.(string) != "x" {
+		t.Fatalf("ExportMaps mutated table: %v", item.Value)
 	}
 	if len(fk["f"]) != 1 {
 		t.Fatalf("fk: %v", fk)
