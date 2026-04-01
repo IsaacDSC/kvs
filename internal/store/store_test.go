@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/db"
 )
 
@@ -260,6 +261,26 @@ func TestSyncEveryWriteAfterSyncCount(t *testing.T) {
 	}
 }
 
+func TestBufferedCommitTransactionFlushes(t *testing.T) {
+	dir := t.TempDir()
+	var n atomic.Int32
+	s, err := Open(dir, Options{Durability: Buffered, AfterSync: func() { n.Add(1) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tb := s.DB().GetOrCreateTable("t")
+	err = tb.NewSession(context.Background(), func(tx *db.Tx) error {
+		return tx.Set(db.Item{Key: "k", Fk: "x", Value: 1})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Load() < 1 {
+		t.Fatalf("expected Flush after transactional commit, syncs=%d", n.Load())
+	}
+}
+
 func TestBufferedSyncsOnFlushAndClose(t *testing.T) {
 	dir := t.TempDir()
 	var n atomic.Int32
@@ -372,6 +393,99 @@ func TestMultiTableIsolation(t *testing.T) {
 	if aItem.Value.(string) != "a1" || bItem.Value.(string) != "b1" {
 		t.Fatalf("va=%v vb=%v", aItem.Value, bItem.Value)
 	}
+}
+
+func TestCommitTransactionReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb := s.DB().GetOrCreateTable("t")
+	err = tb.NewSession(context.Background(), func(tx *db.Tx) error {
+		if err := tx.Set(db.Item{Key: "a", Fk: "x", Value: "1"}); err != nil {
+			return err
+		}
+		return tx.Set(db.Item{Key: "b", Fk: "x", Value: "2"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	tb2 := s2.DB().GetOrCreateTable("t")
+	a, err := tb2.Get("a")
+	if err != nil || a.Value.(string) != "1" {
+		t.Fatalf("a: %v %v", a, err)
+	}
+	b, err := tb2.Get("b")
+	if err != nil || b.Value.(string) != "2" {
+		t.Fatalf("b: %v %v", b, err)
+	}
+}
+
+func TestReplayDiscardsIncompleteTransaction(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("t", db.Item{Key: "base", Fk: "x", Value: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	walPath := filepath.Join(dir, WalFileName)
+	txid := EncodeTxID(1)
+	begin := Entry{Seq: 2, Op: OpBegin, Table: "t", ValueBytes: txid}
+	b0, err := begin.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	val, err := code.Encode(db.Item{Key: "orphan", Fk: "x", Value: "bad"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := Entry{Seq: 3, Op: OpPut, Table: "t", Key: "orphan", Fk: "x", ValueBytes: val}
+	b1, err := put.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(walPath, append(append(readFile(t, walPath), b0...), b1...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(dir, Options{Durability: SyncEveryWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	tb := s2.DB().GetOrCreateTable("t")
+	if _, err := tb.Get("orphan"); err == nil {
+		t.Fatal("orphan should not be visible without COMMIT")
+	}
+	base, err := tb.Get("base")
+	if err != nil || base.Value.(string) != "ok" {
+		t.Fatalf("base: %v %v", base, err)
+	}
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestDoubleReopenIdempotentState(t *testing.T) {

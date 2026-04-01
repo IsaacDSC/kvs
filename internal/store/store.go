@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/fxamacker/cbor/v2"
-
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/db"
 )
@@ -16,6 +14,7 @@ import (
 var ErrEmptyTableName = errors.New("store: empty table name")
 
 var _ db.DurableWriter = (*Store)(nil)
+var _ db.TransactionCommitter = (*Store)(nil)
 
 // Store provides durable Put/Delete backed by a WAL under dir.
 type Store struct {
@@ -25,50 +24,11 @@ type Store struct {
 	wal  *WAL
 	opts Options
 
-	nextSeq uint64
+	nextSeq  uint64
+	nextTxID uint64
 
-	// LastReplayApplied is the number of WAL entries applied during the last Open (seq > checkpoint LastSeq).
+	// LastReplayApplied is the number of WAL frames replayed during the last Open (seq > checkpoint LastSeq).
 	LastReplayApplied int
-}
-
-func maxUint64(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// decodePutItem restores a Put payload. New records are CBOR of db.Item; older WAL
-// records store only Value (CBOR of any), with Key/Fk taken from the frame.
-func decodePutItem(e Entry) (db.Item, error) {
-	var item db.Item
-	if err := cbor.Unmarshal(e.ValueBytes, &item); err == nil && item.Key != "" {
-		if item.Key != e.Key || item.Fk != e.Fk {
-			return db.Item{}, fmt.Errorf("store: wal key/fk does not match item")
-		}
-		return item, nil
-	}
-	var v any
-	if err := cbor.Unmarshal(e.ValueBytes, &v); err != nil {
-		return db.Item{}, err
-	}
-	return db.Item{Key: e.Key, Fk: e.Fk, Value: v}, nil
-}
-
-func applyEntry(database *db.DB, e Entry) error {
-	t := database.GetOrCreateTable(e.Table)
-	switch e.Op {
-	case OpPut:
-		item, err := decodePutItem(e)
-		if err != nil {
-			return err
-		}
-		return t.ApplyPut(item)
-	case OpDel:
-		return t.ApplyDelete(e.Key)
-	default:
-		return errors.New("store: unknown wal op")
-	}
 }
 
 // Open creates dir if needed, loads optional checkpoint, replays WAL, and opens the log for append.
@@ -88,19 +48,13 @@ func Open(dir string, opts Options) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{dir: dir, db: database, wal: wal, opts: opts}
-	applied := 0
-	maxSeq, err := wal.Replay(func(e Entry) error {
-		if e.Seq <= cpSeq {
-			return nil
-		}
-		applied++
-		return applyEntry(database, e)
-	})
+	rs := &replayState{db: database, cpSeq: cpSeq}
+	maxSeq, err := wal.Replay(rs.apply)
 	if err != nil {
 		_ = wal.Close()
 		return nil, err
 	}
-	s.LastReplayApplied = applied
+	s.LastReplayApplied = rs.applied
 	s.nextSeq = maxUint64(cpSeq, maxSeq)
 	database.SetDurable(s)
 	return s, nil
@@ -175,4 +129,87 @@ func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.wal.Close()
+}
+
+// CommitTransaction writes BEGIN → muts → COMMIT to the WAL, then applies muts in memory.
+// It holds s.mu for the whole operation. On Buffered durability, flushes at the end.
+func (s *Store) CommitTransaction(table string, muts []db.TxMutation) error {
+	if table == "" {
+		return ErrEmptyTableName
+	}
+	for i, m := range muts {
+		if m.Put != nil && m.DelKey != "" {
+			return fmt.Errorf("store: tx mutation %d: both put and delete", i)
+		}
+		if m.Put == nil && m.DelKey == "" {
+			return fmt.Errorf("store: tx mutation %d: empty", i)
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.nextTxID++
+	txid := s.nextTxID
+	txBytes := EncodeTxID(txid)
+
+	appendFrame := func(e Entry) error {
+		if err := s.wal.Append(e); err != nil {
+			return err
+		}
+		s.nextSeq = e.Seq
+		return nil
+	}
+
+	seq := s.nextSeq + 1
+	begin := Entry{Seq: seq, Op: OpBegin, Table: table, ValueBytes: txBytes}
+	if err := appendFrame(begin); err != nil {
+		return err
+	}
+
+	for _, m := range muts {
+		seq = s.nextSeq + 1
+		if m.Put != nil {
+			b, err := code.Encode(*m.Put)
+			if err != nil {
+				return err
+			}
+			e := Entry{
+				Seq: seq, Op: OpPut, Table: table,
+				Key: m.Put.Key, Fk: m.Put.Fk, ValueBytes: b,
+			}
+			if err := appendFrame(e); err != nil {
+				return err
+			}
+		} else {
+			e := Entry{Seq: seq, Op: OpDel, Table: table, Key: m.DelKey}
+			if err := appendFrame(e); err != nil {
+				return err
+			}
+		}
+	}
+
+	seq = s.nextSeq + 1
+	commit := Entry{Seq: seq, Op: OpCommit, Table: table, ValueBytes: txBytes}
+	if err := appendFrame(commit); err != nil {
+		return err
+	}
+
+	tb := s.db.GetOrCreateTable(table)
+	for _, m := range muts {
+		if m.Put != nil {
+			if err := tb.ApplyPut(*m.Put); err != nil {
+				return err
+			}
+		} else {
+			if err := tb.ApplyDelete(m.DelKey); err != nil {
+				return err
+			}
+		}
+	}
+
+	if s.opts.Durability == Buffered {
+		return s.wal.Flush()
+	}
+	return nil
 }

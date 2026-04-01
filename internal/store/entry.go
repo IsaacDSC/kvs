@@ -9,44 +9,41 @@ import (
 
 const (
 	// walRecordMagic are the first four bytes of every WAL entry payload ("KVSW").
-	// They tag records as ours and catch wrong offsets or garbage before we parse fields.
 	walMagic0 = 'K'
 	walMagic1 = 'V'
 	walMagic2 = 'S'
 	walMagic3 = 'W'
 
-	// formatVersion is the on-disk layout revision after the magic (field order, types).
-	// Bump when the binary schema changes; readers reject unknown versions.
-	formatVersion uint16 = 1
+	// walFormatVersionV1 is the only supported WAL payload layout (after magic): Put, Del, Begin, Commit.
+	walFormatVersionV1 uint16 = 1
 )
 
 // Op is the mutation kind stored in the WAL.
 type Op byte
 
 const (
-	OpPut Op = 1 // insert/overwrite value
-	OpDel Op = 2 // remove key
+	OpPut    Op = 1 // insert/overwrite value
+	OpDel    Op = 2 // remove key
+	OpBegin  Op = 3 // start transaction (ValueBytes = 8-byte txid BE)
+	OpCommit Op = 4 // commit transaction (ValueBytes = 8-byte txid BE)
 )
 
-// Entry is one logical mutation in the WAL.
+// Entry is one logical record in the WAL.
 type Entry struct {
 	Seq   uint64 // monotonic sequence; total order for replay
 	Op    Op
 	Table string // non-empty logical table name
 	Key   string
 	Fk    string
-	// ValueBytes is CBOR-encoded db.Item for Put (legacy WAL may hold only Value); empty for Delete.
+	// ValueBytes: CBOR db.Item for Put; empty for Del; 8-byte txid BE for Begin/Commit.
 	ValueBytes []byte
 }
 
 var (
-	// ErrCorruptRecord means CRC/magic/op/payload checks failed.
 	ErrCorruptRecord = errors.New("store: corrupt wal record")
-	// ErrTruncated means the byte slice ended before a full frame could be read.
-	ErrTruncated = errors.New("store: truncated wal record")
+	ErrTruncated     = errors.New("store: truncated wal record")
 )
 
-// appendU32 appends big-endian uint32.
 func appendU32(dst []byte, v uint32) []byte {
 	return binary.BigEndian.AppendUint32(dst, v)
 }
@@ -78,25 +75,33 @@ func readString(data []byte, off int) (string, int, error) {
 }
 
 // MarshalBinary encodes one framed WAL record:
-//   [payloadLen u32 BE][payload][crc32 IEEE of payload BE].
+//
+//	[payloadLen u32 BE][payload][crc32 IEEE of payload BE].
 func (e *Entry) MarshalBinary() ([]byte, error) {
 	if e.Table == "" {
 		return nil, fmt.Errorf("store: empty table name")
 	}
 	var payload []byte
 	payload = append(payload, walMagic0, walMagic1, walMagic2, walMagic3)
-	payload = binary.BigEndian.AppendUint16(payload, formatVersion)
+	payload = binary.BigEndian.AppendUint16(payload, walFormatVersionV1)
 	payload = binary.BigEndian.AppendUint64(payload, e.Seq)
 	payload = append(payload, byte(e.Op))
 	payload = appendString(payload, e.Table)
 	payload = appendString(payload, e.Key)
 	payload = appendString(payload, e.Fk)
-	if e.Op == OpPut {
+	switch e.Op {
+	case OpPut:
 		payload = appendU32(payload, uint32(len(e.ValueBytes)))
 		payload = append(payload, e.ValueBytes...)
-	} else if e.Op == OpDel {
+	case OpDel:
 		payload = appendU32(payload, 0)
-	} else {
+	case OpBegin, OpCommit:
+		if len(e.ValueBytes) != 8 {
+			return nil, fmt.Errorf("store: begin/commit require 8-byte txid")
+		}
+		payload = appendU32(payload, 8)
+		payload = append(payload, e.ValueBytes...)
+	default:
 		return nil, fmt.Errorf("store: invalid op %d", e.Op)
 	}
 	crc := crc32.ChecksumIEEE(payload)
@@ -106,11 +111,8 @@ func (e *Entry) MarshalBinary() ([]byte, error) {
 	return out, nil
 }
 
-// UnmarshalBinary decodes one full frame as produced by MarshalBinary
-// (length prefix, payload, trailing CRC).
+// UnmarshalBinary decodes one full frame as produced by MarshalBinary.
 func (e *Entry) UnmarshalBinary(data []byte) error {
-	// Frame externo: [tamanho_payload u32][payload][crc32 u32]
-	// Tamanho mínimo = 4 (tamanho) + 0 (payload vazio teórico) + 4 (crc) = 8 bytes.
 	const frameLenU32 = 4
 	const frameCrcU32 = 4
 	minFrame := frameLenU32 + frameCrcU32
@@ -118,23 +120,18 @@ func (e *Entry) UnmarshalBinary(data []byte) error {
 		return ErrTruncated
 	}
 
-	// Bytes [0:4]: comprimento do payload (não inclui estes 4 nem o CRC).
 	payloadLen := binary.BigEndian.Uint32(data[0:4])
-	// Byte total do frame = prefixo + payload + CRC (8 = 4 + 4).
 	totalFrame := int(payloadLen) + frameLenU32 + frameCrcU32
 	if totalFrame > len(data) {
 		return ErrTruncated
 	}
 
 	payload := data[frameLenU32 : frameLenU32+payloadLen]
-	// CRC ocupa sempre 4 bytes imediatamente após o payload.
 	gotCRC := binary.BigEndian.Uint32(data[frameLenU32+payloadLen : frameLenU32+payloadLen+frameCrcU32])
 	if crc32.ChecksumIEEE(payload) != gotCRC {
 		return ErrCorruptRecord
 	}
 
-	// Cabeçalho fixo dentro do payload (antes das strings variáveis):
-	// magic 4B + versão uint16 2B + Seq uint64 8B + Op uint8 1B = 15 bytes.
 	const (
 		magicBytes     = 4
 		versionBytes   = 2
@@ -154,7 +151,7 @@ func (e *Entry) UnmarshalBinary(data []byte) error {
 
 	ver := binary.BigEndian.Uint16(payload[off:])
 	off += versionBytes
-	if ver != formatVersion {
+	if ver != walFormatVersionV1 {
 		return fmt.Errorf("store: unsupported format version %d", ver)
 	}
 
@@ -178,13 +175,11 @@ func (e *Entry) UnmarshalBinary(data []byte) error {
 		return err
 	}
 
-	// Bloco de valor: comprimento u32 + bytes (Put) ou comprimento 0 (Del).
 	var vlen uint32
 	vlen, off, err = readU32(payload, off)
 	if err != nil {
 		return err
 	}
-	// O cursor deve fechar exactamente no fim do payload (sem lixo a mais).
 	if off+int(vlen) != len(payload) {
 		return ErrCorruptRecord
 	}
@@ -196,8 +191,27 @@ func (e *Entry) UnmarshalBinary(data []byte) error {
 		if len(e.ValueBytes) != 0 {
 			return ErrCorruptRecord
 		}
+	case OpBegin, OpCommit:
+		if len(e.ValueBytes) != 8 {
+			return ErrCorruptRecord
+		}
 	default:
 		return fmt.Errorf("store: invalid op %d", e.Op)
 	}
 	return nil
+}
+
+// TxIDFromValueBytes returns the txid stored in Begin/Commit ValueBytes.
+func TxIDFromValueBytes(b []byte) (uint64, error) {
+	if len(b) != 8 {
+		return 0, ErrCorruptRecord
+	}
+	return binary.BigEndian.Uint64(b), nil
+}
+
+// EncodeTxID encodes a txid for Entry.ValueBytes on Begin/Commit.
+func EncodeTxID(id uint64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, id)
+	return b
 }

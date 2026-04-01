@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -137,5 +138,80 @@ func TestNewSessionSerializesConcurrentSessions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("session2: %v", err)
 		}
+	}
+}
+
+func TestNewSessionMemoryOnlyCommit(t *testing.T) {
+	tb := &Table{
+		VirtualTable: VirtualTable{
+			Data: make(map[string][]byte),
+			Fk:   make(map[string][]string),
+		},
+		Session: make(map[int]VirtualTable),
+	}
+	ctx := context.Background()
+	err := tb.NewSession(ctx, func(tx *Tx) error {
+		return tx.Set(Item{Key: "k", Fk: "f", Value: "v"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := tb.Get("k")
+	if err != nil || got.Value.(string) != "v" {
+		t.Fatalf("got %v %v", got, err)
+	}
+}
+
+func TestNewSessionRollbackOnError(t *testing.T) {
+	tb := &Table{
+		VirtualTable: VirtualTable{
+			Data: make(map[string][]byte),
+			Fk:   make(map[string][]string),
+		},
+		Session: make(map[int]VirtualTable),
+	}
+	_ = tb.Set(Item{Key: "k", Fk: "f", Value: "old"})
+	ctx := context.Background()
+	want := errors.New("fail")
+	err := tb.NewSession(ctx, func(tx *Tx) error {
+		if err := tx.Set(Item{Key: "k", Fk: "f", Value: "new"}); err != nil {
+			return err
+		}
+		return want
+	})
+	if err == nil || !strings.Contains(err.Error(), "session error") {
+		t.Fatalf("expected session error, got %v", err)
+	}
+	got, _ := tb.Get("k")
+	if got.Value.(string) != "old" {
+		t.Fatalf("value should rollback, got %v", got.Value)
+	}
+}
+
+func TestNewSessionGetByFkStaging(t *testing.T) {
+	tb := &Table{
+		VirtualTable: VirtualTable{
+			Data: make(map[string][]byte),
+			Fk:   make(map[string][]string),
+		},
+		Session: make(map[int]VirtualTable),
+	}
+	_ = tb.Set(Item{Key: "a", Fk: "g", Value: "1"})
+	ctx := context.Background()
+	err := tb.NewSession(ctx, func(tx *Tx) error {
+		if err := tx.Set(Item{Key: "b", Fk: "g", Value: "2"}); err != nil {
+			return err
+		}
+		items, err := tx.GetByFk("g")
+		if err != nil {
+			return err
+		}
+		if len(items) != 2 {
+			t.Fatalf("GetByFk want 2, got %d", len(items))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
