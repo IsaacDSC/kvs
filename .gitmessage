@@ -1,0 +1,13 @@
+# <tipo>(<escopo opcional>): resumo curto na imperativo
+# |<----  máx. ~50 caracteres  ---->|
+#
+# Corpo (opcional): o que mudou e porquê, em frases completas.
+# Separa o corpo do resumo com uma linha em branco.
+#
+# Rodapé (opcional):
+# Fixes #123
+# BREAKING CHANGE: descrição clara do impacto
+#
+# Tipos permitidos: feat | fix | docs | test | refactor | build | ci
+#
+# --- As linhas que começam por # são comentários; remove-as antes de gravar. ---

@@ -1,0 +1,8 @@
+# Mensagens de commit (painel Git – Gerar mensagem)
+
+O botão de gerar commit no SCM só lê instruções daqui; mantém alinhado com `.gitmessage` e `.cursor/rules/commit-message.mdc`.
+
+- **Primeira linha:** `tipo(escopo opcional): resumo` — imperativo, até ~50 caracteres, sem ponto final.
+- **Tipos permitidos (só estes):** `feat`, `fix`, `docs`, `test`, `refactor`, `build`, `ci`.
+- **Corpo (opcional):** linha em branco após o resumo; explica o quê e porquê, em frases completas. Português ou inglês, consistente.
+- **Não** incluir linhas começadas por `#` na mensagem final. Rodapés opcionais: `Fixes #…`, `BREAKING CHANGE: …`.

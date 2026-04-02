@@ -40,8 +40,8 @@ func (t *Table) OptimisticPut(ctx context.Context, item Item, candidate string) 
 }
 
 // OptimisticDelete applies optimistic version rules and deletes via Table.Delete (WAL when the DB is durable).
-func (t *Table) OptimisticDelete(ctx context.Context, item Item) OptimisticResult {
-	return t.NewOptimisticLocking(ctx).Del(item)
+func (t *Table) OptimisticDelete(ctx context.Context, item Item, candidate string) OptimisticResult {
+	return t.NewOptimisticLocking(ctx).Del(item, candidate)
 }
 
 func (ol OptimisticLocking) Set(item Item, candidate string) OptimisticResult {
@@ -68,7 +68,7 @@ func (ol OptimisticLocking) Set(item Item, candidate string) OptimisticResult {
 	return OptimisticResult{item: item}
 }
 
-func (ol OptimisticLocking) Del(item Item) OptimisticResult {
+func (ol OptimisticLocking) Del(item Item, candidate string) OptimisticResult {
 	dbItem, err := ol.table.Get(item.Key)
 	if err != nil {
 		return OptimisticResult{err: err}

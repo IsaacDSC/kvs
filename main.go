@@ -100,6 +100,13 @@ func main() {
 		// panic(err)
 	}
 
+	delResult := table.OptimisticDelete(ctx, item, "3")
+	if err := delResult.Err(); err != nil {
+		lastVersion, err := result2.GetLastVersion()
+		fmt.Println("expected error Del version mismatch:", lastVersion, err)
+		// panic(err)
+	}
+
 	it, err := table.Get("1")
 	if err != nil {
 		panic(err)

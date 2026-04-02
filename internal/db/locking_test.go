@@ -121,7 +121,7 @@ func TestOptimisticDelete_ConcurrentStaleVersionRejected(t *testing.T) {
 				break
 			}
 		}
-		slowRes = tb.OptimisticDelete(ctx, Item{Key: "k", Version: "v1"})
+		slowRes = tb.OptimisticDelete(ctx, Item{Key: "k", Version: "v1"}, "v1")
 	}()
 
 	close(start)
@@ -151,4 +151,3 @@ func TestOptimisticDelete_ConcurrentStaleVersionRejected(t *testing.T) {
 		t.Fatalf("final.Version=%q want %q", final.Version, "v2")
 	}
 }
-
