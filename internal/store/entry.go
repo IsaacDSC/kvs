@@ -35,7 +35,7 @@ type Entry struct {
 	Table string // non-empty logical table name
 	Key   string
 	Fk    string
-	// ValueBytes: CBOR db.Item for Put; empty for Del; 8-byte txid BE for Begin/Commit.
+	// ValueBytes: CBOR memdb.Item for Put; empty for Del; 8-byte txid BE for Begin/Commit.
 	ValueBytes []byte
 }
 

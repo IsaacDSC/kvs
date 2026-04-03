@@ -9,18 +9,16 @@ import (
 
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/memdb"
 )
 
 var ErrEmptyTableName = errors.New("store: empty table name")
 
-var _ db.DurableWriter = (*Store)(nil)
-var _ db.TransactionCommitter = (*Store)(nil)
-
-// Store provides durable Put/Delete backed by a WAL under dir.
+// Store provides a durable key-value store backed by a WAL under dir; mutations go through Table (memdb/db façade).
 type Store struct {
 	mu   sync.Mutex
 	dir  string
-	db   *db.DB
+	db   *memdb.DB
 	wal  *WAL
 	opts Options
 
@@ -36,7 +34,7 @@ func Open(dir string, opts Options) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	database := db.NewDB()
+	database := memdb.NewDB()
 	cpSeq, err := loadCheckpoint(dir, database)
 	if err != nil {
 		return nil, err
@@ -56,14 +54,17 @@ func Open(dir string, opts Options) (*Store, error) {
 	}
 	s.LastReplayApplied = rs.applied
 	s.nextSeq = maxUint64(cpSeq, maxSeq)
-	database.SetDurable(s)
+	database.SetDurable(&storeDurable{s: s})
 	return s, nil
 }
 
-func (s *Store) DB() *db.DB { return s.db }
+func (s *Store) DB() *memdb.DB { return s.db }
+
+// AppDB returns a façade over the in-memory database (forward-only; see internal/db).
+func (s *Store) AppDB() *db.DB { return db.Wrap(s.db) }
 
 // putLocked appends a Put to the WAL and updates memory. s.mu must be held.
-func (s *Store) putLocked(table string, item db.Item) error {
+func (s *Store) putLocked(table string, item memdb.Item) error {
 	if table == "" {
 		return ErrEmptyTableName
 	}
@@ -81,13 +82,6 @@ func (s *Store) putLocked(table string, item db.Item) error {
 	return tb.ApplyPut(item)
 }
 
-// Put appends to the WAL then updates memory.
-func (s *Store) Put(table string, item db.Item) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.putLocked(table, item)
-}
-
 // deleteLocked appends a delete to the WAL and updates memory. s.mu must be held.
 func (s *Store) deleteLocked(table, key string) error {
 	if table == "" {
@@ -101,13 +95,6 @@ func (s *Store) deleteLocked(table, key string) error {
 	s.nextSeq = seq
 	tb := s.db.GetOrCreateTable(table)
 	return tb.ApplyDelete(key)
-}
-
-// Delete appends a delete record then updates memory.
-func (s *Store) Delete(table, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.deleteLocked(table, key)
 }
 
 // Checkpoint writes a snapshot including current nextSeq as LastSeq.
@@ -131,12 +118,7 @@ func (s *Store) Close() error {
 	return s.wal.Close()
 }
 
-// CommitTransaction writes BEGIN → muts → COMMIT to the WAL, then applies muts in memory.
-// It holds s.mu for the whole operation. On Buffered durability, flushes at the end.
-func (s *Store) CommitTransaction(table string, muts []db.TxMutation) error {
-	if table == "" {
-		return ErrEmptyTableName
-	}
+func validateTxMuts(muts []memdb.TxMutation) error {
 	for i, m := range muts {
 		if m.Put != nil && m.DelKey != "" {
 			return fmt.Errorf("store: tx mutation %d: both put and delete", i)
@@ -145,10 +127,25 @@ func (s *Store) CommitTransaction(table string, muts []db.TxMutation) error {
 			return fmt.Errorf("store: tx mutation %d: empty", i)
 		}
 	}
+	return nil
+}
 
+// commitTransaction writes BEGIN → muts → COMMIT to the WAL, then applies muts in memory.
+// It holds s.mu for the WAL/memory phase. On Buffered durability, flushes at the end.
+func (s *Store) commitTransaction(table string, muts []memdb.TxMutation) error {
+	if table == "" {
+		return ErrEmptyTableName
+	}
+	if err := validateTxMuts(muts); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.commitTransactionLocked(table, muts)
+}
 
+// commitTransactionLocked is the body of commitTransaction; s.mu must be held.
+func (s *Store) commitTransactionLocked(table string, muts []memdb.TxMutation) error {
 	s.nextTxID++
 	txid := s.nextTxID
 	txBytes := EncodeTxID(txid)

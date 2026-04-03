@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/memdb"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -13,7 +13,7 @@ const CheckpointFileName = "checkpoint.cbor"
 
 type checkpointFile struct {
 	Version int                  `cbor:"v"`
-	LastSeq uint64              `cbor:"seq"`
+	LastSeq uint64               `cbor:"seq"`
 	Tables  map[string]tableSnap `cbor:"t"`
 }
 
@@ -22,7 +22,7 @@ type tableSnap struct {
 	Fk   map[string][]string `cbor:"fk"`
 }
 
-func loadCheckpoint(dir string, database *db.DB) (lastSeq uint64, err error) {
+func loadCheckpoint(dir string, database *memdb.DB) (lastSeq uint64, err error) {
 	path := filepath.Join(dir, CheckpointFileName)
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -41,12 +41,12 @@ func loadCheckpoint(dir string, database *db.DB) (lastSeq uint64, err error) {
 	database.Lock.Lock()
 	defer database.Lock.Unlock()
 	for name, snap := range cf.Tables {
-		database.Tables[name] = db.NewTableFromSnapshot(copyBytesMap(snap.Data), copyStringSliceMap(snap.Fk))
+		database.Tables[name] = memdb.NewTableFromSnapshot(copyBytesMap(snap.Data), copyStringSliceMap(snap.Fk))
 	}
 	return cf.LastSeq, nil
 }
 
-func saveCheckpoint(dir string, database *db.DB, lastSeq uint64) error {
+func saveCheckpoint(dir string, database *memdb.DB, lastSeq uint64) error {
 	cf := checkpointFile{
 		Version: 1,
 		LastSeq: lastSeq,

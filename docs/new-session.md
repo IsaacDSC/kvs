@@ -20,11 +20,11 @@ Se `fn` falhar, o contexto cancelar/estourar tempo, ou o commit falhar → **nen
 ## Exemplo
 
 ```go
-table := database.GetOrCreateTable("users") // *db.DB após store.Open, etc.
+table := database.GetOrCreateTable("users") // *memdb.DB após store.Open, etc.
 
 ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
 
-err := table.NewSession(ctx, func(tx *db.Tx) error {
+err := table.NewSession(ctx, func(tx *memdb.Tx) error {
     item, err := tx.Get("1")
     if err != nil {
         return err

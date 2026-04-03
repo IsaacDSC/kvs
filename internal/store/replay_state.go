@@ -3,12 +3,12 @@ package store
 import (
 	"fmt"
 
-	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/memdb"
 )
 
 // replayState applies WAL entries: immediate Put/Del, or buffered groups between Begin and Commit.
 type replayState struct {
-	db    *db.DB
+	db    *memdb.DB
 	cpSeq uint64
 
 	open      bool
