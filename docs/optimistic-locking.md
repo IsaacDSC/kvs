@@ -35,7 +35,7 @@ res := table.OptimisticPut(ctx, Item{
     Version: cur.Version, // tens de ir buscar a versão que lês
 }, "v2") // próxima versão após sucesso
 
-if err := res.Err(); errors.Is(err, db.ErrInvalidVersion) {
+if err := res.Err(); errors.Is(err, memdb.ErrInvalidVersion) {
     last, _ := res.GetLastVersion()
     // alguém alterou antes: last tem o valor/versão atuais
     _ = last
@@ -52,5 +52,5 @@ Para apagar com versão:
 ```go
 cur, _ := table.Get("k")
 res := table.OptimisticDelete(ctx, Item{Key: cur.Key, Version: cur.Version}, "v3")
-if errors.Is(res.Err(), db.ErrInvalidVersion) { /* reler e repetir */ }
+if errors.Is(res.Err(), memdb.ErrInvalidVersion) { /* reler e repetir */ }
 ```

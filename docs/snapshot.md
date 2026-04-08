@@ -22,7 +22,7 @@ Não existem ficheiros de WAL por tabela: **todas as tabelas** escrevem no mesmo
 
 ### Escrita
 
-`Store.Checkpoint()` bloqueia a store, serializa o estado actual do `db.DB` e grava com escrita atómica: ficheiro temporário + `rename` para `checkpoint.cbor`.
+`Store.Checkpoint()` bloqueia a store, serializa o estado actual do `memdb.DB` e grava com escrita atómica: ficheiro temporário + `rename` para `checkpoint.cbor`.
 
 O **`LastSeq` guardado** é o `nextSeq` actual da store — ou seja, o número de sequência já atribuído à última mutação registada no WAL. Qualquer entrada do WAL com `Seq <= LastSeq` é considerada **já refletida** no snapshot.
 

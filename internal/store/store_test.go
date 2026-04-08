@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/IsaacDSC/kvs/internal/code"
-	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/memdb"
 )
 
 func TestOpenCreatesLayoutAndReopen(t *testing.T) {
@@ -39,9 +39,10 @@ func TestReopenRecoversPuts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tb0 := s.DB().GetOrCreateTable("users")
 	for i := 0; i < 20; i++ {
 		key := strconv.Itoa(i)
-		if err := s.Put("users", db.Item{Key: key, Fk: "g", Value: key + "-v"}); err != nil {
+		if err := tb0.Set(memdb.Item{Key: key, Fk: "g", Value: key + "-v"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -73,9 +74,10 @@ func TestReopenRecoversDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = s.Put("t", db.Item{Key: "a", Fk: "x", Value: "1"})
-	_ = s.Put("t", db.Item{Key: "b", Fk: "x", Value: "2"})
-	if err := s.Delete("t", "a"); err != nil {
+	tbd := s.DB().GetOrCreateTable("t")
+	_ = tbd.Set(memdb.Item{Key: "a", Fk: "x", Value: "1"})
+	_ = tbd.Set(memdb.Item{Key: "b", Fk: "x", Value: "2"})
+	if err := tbd.Delete("a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -103,7 +105,8 @@ func TestOptimisticPutPersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put("t", db.Item{Key: "k", Fk: "f", Value: "before"}); err != nil {
+	tbw := s.DB().GetOrCreateTable("t")
+	if err := tbw.Set(memdb.Item{Key: "k", Fk: "f", Value: "before"}); err != nil {
 		t.Fatal(err)
 	}
 	item, err := s.DB().GetOrCreateTable("t").Get("k")
@@ -140,12 +143,13 @@ func TestSessionPersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put("t", db.Item{Key: "k", Fk: "f", Value: "a"}); err != nil {
+	tbp := s.DB().GetOrCreateTable("t")
+	if err := tbp.Set(memdb.Item{Key: "k", Fk: "f", Value: "a"}); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
 	tb := s.DB().GetOrCreateTable("t")
-	err = tb.NewSession(ctx, func(tx *db.Tx) error {
+	err = tb.NewSession(ctx, func(tx *memdb.Tx) error {
 		it, err := tx.Get("k")
 		if err != nil {
 			return err
@@ -177,12 +181,13 @@ func TestOptimisticDeletePersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put("t", db.Item{Key: "k", Fk: "f", Value: "x", Version: "v1"}); err != nil {
+	tbo := s.DB().GetOrCreateTable("t")
+	if err := tbo.Set(memdb.Item{Key: "k", Fk: "f", Value: "x", Version: "v1"}); err != nil {
 		t.Fatal(err)
 	}
-	item := db.Item{Key: "k", Fk: "f", Value: "x", Version: "v1"}
+	item := memdb.Item{Key: "k", Fk: "f", Value: "x", Version: "v1"}
 	tb := s.DB().GetOrCreateTable("t")
-	res := tb.OptimisticDelete(context.Background(), item)
+	res := tb.OptimisticDelete(context.Background(), item, "v1")
 	if err := res.Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +211,8 @@ func TestCorruptTailTruncatedOnOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put("t", db.Item{Key: "k", Fk: "f", Value: "v42"}); err != nil {
+	tbc := s.DB().GetOrCreateTable("t")
+	if err := tbc.Set(memdb.Item{Key: "k", Fk: "f", Value: "v42"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -238,7 +244,7 @@ func TestPutEmptyTableName(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.Put("", db.Item{Key: "k", Value: 1}); err != ErrEmptyTableName {
+	if err := (&storeDurable{s: s}).Put("", memdb.Item{Key: "k", Value: 1}); err != ErrEmptyTableName {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -251,8 +257,9 @@ func TestSyncEveryWriteAfterSyncCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	tbs := s.DB().GetOrCreateTable("t")
 	for i := 0; i < 4; i++ {
-		if err := s.Put("t", db.Item{Key: strconv.Itoa(i), Fk: "x", Value: i}); err != nil {
+		if err := tbs.Set(memdb.Item{Key: strconv.Itoa(i), Fk: "x", Value: i}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -270,8 +277,8 @@ func TestBufferedCommitTransactionFlushes(t *testing.T) {
 	}
 	defer s.Close()
 	tb := s.DB().GetOrCreateTable("t")
-	err = tb.NewSession(context.Background(), func(tx *db.Tx) error {
-		return tx.Set(db.Item{Key: "k", Fk: "x", Value: 1})
+	err = tb.NewSession(context.Background(), func(tx *memdb.Tx) error {
+		return tx.Set(memdb.Item{Key: "k", Fk: "x", Value: 1})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -288,8 +295,9 @@ func TestBufferedSyncsOnFlushAndClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tbf := s.DB().GetOrCreateTable("t")
 	for i := 0; i < 3; i++ {
-		if err := s.Put("t", db.Item{Key: strconv.Itoa(i), Fk: "x", Value: i}); err != nil {
+		if err := tbf.Set(memdb.Item{Key: strconv.Itoa(i), Fk: "x", Value: i}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -317,8 +325,9 @@ func TestCheckpointSkipsEarlierWALOnReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tblW := s.DB().GetOrCreateTable("tbl")
 	for i := 0; i < 10; i++ {
-		if err := s.Put("tbl", db.Item{Key: strconv.Itoa(i), Fk: "x", Value: i}); err != nil {
+		if err := tblW.Set(memdb.Item{Key: strconv.Itoa(i), Fk: "x", Value: i}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -336,7 +345,8 @@ func TestCheckpointSkipsEarlierWALOnReplay(t *testing.T) {
 	if s2.LastReplayApplied != 0 {
 		t.Fatalf("after checkpoint reopen should apply 0 wal tail, got %d", s2.LastReplayApplied)
 	}
-	if err := s2.Put("tbl", db.Item{Key: "extra", Fk: "x", Value: 99}); err != nil {
+	tbl2 := s2.DB().GetOrCreateTable("tbl")
+	if err := tbl2.Set(memdb.Item{Key: "extra", Fk: "x", Value: 99}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s2.Close(); err != nil {
@@ -377,8 +387,8 @@ func TestMultiTableIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = s.Put("a", db.Item{Key: "1", Fk: "x", Value: "a1"})
-	_ = s.Put("b", db.Item{Key: "1", Fk: "y", Value: "b1"})
+	_ = s.DB().GetOrCreateTable("a").Set(memdb.Item{Key: "1", Fk: "x", Value: "a1"})
+	_ = s.DB().GetOrCreateTable("b").Set(memdb.Item{Key: "1", Fk: "y", Value: "b1"})
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -402,11 +412,11 @@ func TestCommitTransactionReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	tb := s.DB().GetOrCreateTable("t")
-	err = tb.NewSession(context.Background(), func(tx *db.Tx) error {
-		if err := tx.Set(db.Item{Key: "a", Fk: "x", Value: "1"}); err != nil {
+	err = tb.NewSession(context.Background(), func(tx *memdb.Tx) error {
+		if err := tx.Set(memdb.Item{Key: "a", Fk: "x", Value: "1"}); err != nil {
 			return err
 		}
-		return tx.Set(db.Item{Key: "b", Fk: "x", Value: "2"})
+		return tx.Set(memdb.Item{Key: "b", Fk: "x", Value: "2"})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -437,7 +447,7 @@ func TestReplayDiscardsIncompleteTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put("t", db.Item{Key: "base", Fk: "x", Value: "ok"}); err != nil {
+	if err := s.DB().GetOrCreateTable("t").Set(memdb.Item{Key: "base", Fk: "x", Value: "ok"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -451,7 +461,7 @@ func TestReplayDiscardsIncompleteTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	val, err := code.Encode(db.Item{Key: "orphan", Fk: "x", Value: "bad"})
+	val, err := code.Encode(memdb.Item{Key: "orphan", Fk: "x", Value: "bad"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +501,7 @@ func readFile(t *testing.T, path string) []byte {
 func TestDoubleReopenIdempotentState(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir, Options{Durability: SyncEveryWrite})
-	_ = s.Put("t", db.Item{Key: "k", Fk: "f", Value: "v"})
+	_ = s.DB().GetOrCreateTable("t").Set(memdb.Item{Key: "k", Fk: "f", Value: "v"})
 	_ = s.Close()
 	s2, _ := Open(dir, Options{Durability: SyncEveryWrite})
 	_ = s2.Close()
