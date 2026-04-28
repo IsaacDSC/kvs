@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package raft;
+
+option go_package = "github.com/IsaacDSC/kvs/proto/raft;raft";
+
+// Raft defines the two RPCs used by the Raft consensus algorithm.
+service Raft {
+  // RequestVote is called by Candidates during elections (unary).
+  rpc RequestVote(VoteRequest) returns (VoteResponse);
+
+  // Replicate is a bidirectional stream used by the Leader to replicate log
+  // entries to Followers.  The same stream carries both AppendEntries RPCs
+  // (with entries) and periodic heartbeats (empty entries).
+  rpc Replicate(stream ReplicateRequest) returns (stream ReplicateResponse);
+}
+
+message LogEntry {
+  int32  term    = 1;
+  string command = 2;
+}
+
+message VoteRequest {
+  int32  term           = 1;
+  string candidate_id   = 2;
+  int32  last_log_index = 3;
+  int32  last_log_term  = 4;
+}
+
+message VoteResponse {
+  int32 term         = 1;
+  bool  vote_granted = 2;
+}
+
+message ReplicateRequest {
+  int32             term           = 1;
+  string            leader_id      = 2;
+  int32             prev_log_index = 3;
+  int32             prev_log_term  = 4;
+  repeated LogEntry entries        = 5;
+  int32             leader_commit  = 6;
+}
+
+message ReplicateResponse {
+  int32 term    = 1;
+  bool  success = 2;
+}

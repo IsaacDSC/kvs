@@ -3,6 +3,8 @@ package memdb
 import (
 	"errors"
 	"testing"
+
+	"github.com/IsaacDSC/kvs/internal/item"
 )
 
 func TestTableSetGet(t *testing.T) {
@@ -13,7 +15,7 @@ func TestTableSetGet(t *testing.T) {
 		},
 		Session: make(map[int]VirtualTable),
 	}
-	if err := tb.Set(Item{Key: "k1", Fk: "f1", Value: "hello"}); err != nil {
+	if err := tb.Set(item.Entity{Key: "k1", Fk: "f1", Value: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	item, err := tb.Get("k1")
@@ -36,8 +38,8 @@ func TestTableGetByFk(t *testing.T) {
 		},
 		Session: make(map[int]VirtualTable),
 	}
-	_ = tb.Set(Item{Key: "a", Fk: "grp", Value: "1"})
-	_ = tb.Set(Item{Key: "b", Fk: "grp", Value: "2"})
+	_ = tb.Set(item.Entity{Key: "a", Fk: "grp", Value: "1"})
+	_ = tb.Set(item.Entity{Key: "b", Fk: "grp", Value: "2"})
 	items, err := tb.GetByFk("grp")
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +60,7 @@ func TestTableDelete(t *testing.T) {
 		},
 		Session: make(map[int]VirtualTable),
 	}
-	_ = tb.Set(Item{Key: "x", Fk: "g", Value: 42})
+	_ = tb.Set(item.Entity{Key: "x", Fk: "g", Value: 42})
 	if err := tb.Delete("x"); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +80,7 @@ func TestTableExportMapsDeepCopy(t *testing.T) {
 		},
 		Session: make(map[int]VirtualTable),
 	}
-	_ = tb.Set(Item{Key: "k", Fk: "f", Value: "x"})
+	_ = tb.Set(item.Entity{Key: "k", Fk: "f", Value: "x"})
 	d, fk := tb.ExportMaps()
 	d["k"][0] = 'y'
 	item, _ := tb.Get("k")
@@ -98,10 +100,10 @@ func TestTableDuplicateFkKey(t *testing.T) {
 		},
 		Session: make(map[int]VirtualTable),
 	}
-	if err := tb.Set(Item{Key: "k", Fk: "f", Value: "a"}); err != nil {
+	if err := tb.Set(item.Entity{Key: "k", Fk: "f", Value: "a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := tb.Set(Item{Key: "k", Fk: "f", Value: "b"}); err != nil {
+	if err := tb.Set(item.Entity{Key: "k", Fk: "f", Value: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	items, _ := tb.GetByFk("f")

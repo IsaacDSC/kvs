@@ -1,15 +1,17 @@
 package memdb
 
+import "github.com/IsaacDSC/kvs/internal/item"
+
 // DurableWriter receives mutations that must be persisted (e.g. append to WAL).
 // A nil DurableWriter means Table.Set/Delete update memory only (tests, replay helpers).
 type DurableWriter interface {
-	Put(table string, item Item) error
+	Put(table string, item item.Entity) error
 	Delete(table, key string) error
 }
 
 // TxMutation is one step in a transactional session. Exactly one of Put or DelKey is set.
 type TxMutation struct {
-	Put    *Item
+	Put    *item.Entity
 	DelKey string
 }
 

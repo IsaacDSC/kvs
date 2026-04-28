@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"testing"
+
+	"github.com/IsaacDSC/kvs/internal/item"
 )
 
 func newTestTable() *Table {
@@ -22,7 +24,7 @@ func TestOptimisticPut_ConcurrentStaleVersionRejected(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed item with a known version.
-	if err := tb.Set(Item{Key: "k", Fk: "f", Value: "base", Version: "v1"}); err != nil {
+	if err := tb.Set(item.Entity{Key: "k", Fk: "f", Value: "base", Version: "v1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,7 +37,7 @@ func TestOptimisticPut_ConcurrentStaleVersionRejected(t *testing.T) {
 		defer wg.Done()
 		<-start
 		// Fast writer updates from v1 -> v2.
-		res := tb.OptimisticPut(ctx, Item{Key: "k", Fk: "f", Value: "fast", Version: "v1"}, "v2")
+		res := tb.OptimisticPut(ctx, item.Entity{Key: "k", Fk: "f", Value: "fast", Version: "v1"}, "v2")
 		fastErr = res.Err()
 	}()
 
@@ -54,7 +56,7 @@ func TestOptimisticPut_ConcurrentStaleVersionRejected(t *testing.T) {
 				break
 			}
 		}
-		slowRes = tb.OptimisticPut(ctx, Item{Key: "k", Fk: "f", Value: "slow", Version: "v1"}, "v3")
+		slowRes = tb.OptimisticPut(ctx, item.Entity{Key: "k", Fk: "f", Value: "slow", Version: "v1"}, "v3")
 	}()
 
 	close(start)
@@ -90,7 +92,7 @@ func TestOptimisticDelete_ConcurrentStaleVersionRejected(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed item with a known version.
-	if err := tb.Set(Item{Key: "k", Fk: "f", Value: "base", Version: "v1"}); err != nil {
+	if err := tb.Set(item.Entity{Key: "k", Fk: "f", Value: "base", Version: "v1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -103,7 +105,7 @@ func TestOptimisticDelete_ConcurrentStaleVersionRejected(t *testing.T) {
 		defer wg.Done()
 		<-start
 		// Fast writer updates v1 -> v2, making v1 stale.
-		res := tb.OptimisticPut(ctx, Item{Key: "k", Fk: "f", Value: "fast", Version: "v1"}, "v2")
+		res := tb.OptimisticPut(ctx, item.Entity{Key: "k", Fk: "f", Value: "fast", Version: "v1"}, "v2")
 		fastErr = res.Err()
 	}()
 
@@ -121,7 +123,7 @@ func TestOptimisticDelete_ConcurrentStaleVersionRejected(t *testing.T) {
 				break
 			}
 		}
-		slowRes = tb.OptimisticDelete(ctx, Item{Key: "k", Version: "v1"}, "v1")
+		slowRes = tb.OptimisticDelete(ctx, item.Entity{Key: "k", Version: "v1"}, "v1")
 	}()
 
 	close(start)

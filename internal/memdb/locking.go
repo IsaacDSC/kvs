@@ -3,6 +3,8 @@ package memdb
 import (
 	"context"
 	"errors"
+
+	"github.com/IsaacDSC/kvs/internal/item"
 )
 
 type OptimisticLocking struct {
@@ -10,11 +12,11 @@ type OptimisticLocking struct {
 }
 
 type OptimisticResult struct {
-	item Item
+	item item.Entity
 	err  error
 }
 
-func MakeOptimisticResult(item Item, err error) OptimisticResult {
+func MakeOptimisticResult(item item.Entity, err error) OptimisticResult {
 	return OptimisticResult{item: item, err: err}
 }
 
@@ -22,12 +24,12 @@ func (or OptimisticResult) Err() error {
 	return or.err
 }
 
-func (or OptimisticResult) GetLastVersion() (Item, error) {
+func (or OptimisticResult) GetLastVersion() (item.Entity, error) {
 	if errors.Is(or.err, ErrInvalidVersion) {
 		return or.item, nil
 	}
 
-	return Item{}, or.err
+	return item.Entity{}, or.err
 }
 
 func (t *Table) NewOptimisticLocking(ctx context.Context) *OptimisticLocking {
@@ -35,16 +37,16 @@ func (t *Table) NewOptimisticLocking(ctx context.Context) *OptimisticLocking {
 }
 
 // OptimisticPut applies optimistic version rules and writes via Table.Set (WAL when the DB is durable).
-func (t *Table) OptimisticPut(ctx context.Context, item Item, candidate string) OptimisticResult {
+func (t *Table) OptimisticPut(ctx context.Context, item item.Entity, candidate string) OptimisticResult {
 	return t.NewOptimisticLocking(ctx).Set(item, candidate)
 }
 
 // OptimisticDelete applies optimistic version rules and deletes via Table.Delete (WAL when the DB is durable).
-func (t *Table) OptimisticDelete(ctx context.Context, item Item, candidate string) OptimisticResult {
+func (t *Table) OptimisticDelete(ctx context.Context, item item.Entity, candidate string) OptimisticResult {
 	return t.NewOptimisticLocking(ctx).Del(item, candidate)
 }
 
-func (ol OptimisticLocking) Set(item Item, candidate string) OptimisticResult {
+func (ol OptimisticLocking) Set(item item.Entity, candidate string) OptimisticResult {
 	dbItem, err := ol.table.Get(item.Key)
 	if err != nil {
 		return OptimisticResult{err: err}
@@ -68,7 +70,7 @@ func (ol OptimisticLocking) Set(item Item, candidate string) OptimisticResult {
 	return OptimisticResult{item: item}
 }
 
-func (ol OptimisticLocking) Del(item Item, candidate string) OptimisticResult {
+func (ol OptimisticLocking) Del(item item.Entity, candidate string) OptimisticResult {
 	dbItem, err := ol.table.Get(item.Key)
 	if err != nil {
 		return OptimisticResult{err: err}

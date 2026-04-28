@@ -1,9 +1,12 @@
 package db
 
-import "github.com/IsaacDSC/kvs/internal/memdb"
+import (
+	"github.com/IsaacDSC/kvs/internal/item"
+	"github.com/IsaacDSC/kvs/internal/memdb"
+)
 
 // Item and Table are aliases so callers can use the db package without importing memdb.
-type Item = memdb.Item
+type Item = item.Entity
 type Table = memdb.Table
 type Tx = memdb.Tx
 

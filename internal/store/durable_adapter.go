@@ -1,6 +1,9 @@
 package store
 
-import "github.com/IsaacDSC/kvs/internal/memdb"
+import (
+	"github.com/IsaacDSC/kvs/internal/item"
+	"github.com/IsaacDSC/kvs/internal/memdb"
+)
 
 var (
 	_ memdb.DurableWriter        = (*storeDurable)(nil)
@@ -12,7 +15,7 @@ type storeDurable struct {
 	s *Store
 }
 
-func (d *storeDurable) Put(table string, item memdb.Item) error {
+func (d *storeDurable) Put(table string, item item.Entity) error {
 	d.s.mu.Lock()
 	defer d.s.mu.Unlock()
 	return d.s.putLocked(table, item)

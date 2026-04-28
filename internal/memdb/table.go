@@ -7,6 +7,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 
 	"github.com/IsaacDSC/kvs/internal/code"
+	"github.com/IsaacDSC/kvs/internal/item"
 )
 
 // VirtualTable stores values as CBOR bytes; the public Table API still uses any.
@@ -26,13 +27,6 @@ type Table struct {
 	sessionSem  chan struct{}
 }
 
-type Item struct {
-	Key     string
-	Fk      string
-	Value   any
-	Version string
-}
-
 func (t *Table) initSessionLock() {
 	t.sessionOnce.Do(func() {
 		t.sessionSem = make(chan struct{}, 1)
@@ -41,7 +35,7 @@ func (t *Table) initSessionLock() {
 }
 
 // Set inserts or updates item. If the DB is opened via store.Open, this records a WAL entry.
-func (t *Table) Set(item Item) error {
+func (t *Table) Set(item item.Entity) error {
 	if t.durable != nil && t.name != "" {
 		return t.durable.Put(t.name, item)
 	}
@@ -51,13 +45,13 @@ func (t *Table) Set(item Item) error {
 }
 
 // ApplyPut updates memory only; used when replaying the WAL or after a WAL append inside the store.
-func (t *Table) ApplyPut(item Item) error {
+func (t *Table) ApplyPut(item item.Entity) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.addLocked(item)
 }
 
-func (t *Table) addLocked(item Item) error {
+func (t *Table) addLocked(item item.Entity) error {
 	b, err := code.Encode(item)
 	if err != nil {
 		return errors.Join(ErrEncodeValue, err)
@@ -72,25 +66,25 @@ func (t *Table) addLocked(item Item) error {
 	return nil
 }
 
-func (t *Table) Get(key string) (Item, error) {
+func (t *Table) Get(key string) (item.Entity, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.getLocked(key)
 }
 
-func (t *Table) getLocked(key string) (Item, error) {
+func (t *Table) getLocked(key string) (item.Entity, error) {
 	b, ok := t.Data[key]
 	if !ok {
-		return Item{}, ErrKeyNotFound
+		return item.Entity{}, ErrKeyNotFound
 	}
-	var item Item
+	var item item.Entity
 	if err := cbor.Unmarshal(b, &item); err != nil {
-		return Item{}, errors.Join(ErrDecodeValue, err)
+		return item, errors.Join(ErrDecodeValue, err)
 	}
 	return item, nil
 }
 
-func (t *Table) GetByFk(fk string) ([]Item, error) {
+func (t *Table) GetByFk(fk string) ([]item.Entity, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	items, err := t.getByFkLocked(fk)
@@ -103,15 +97,15 @@ func (t *Table) GetByFk(fk string) ([]Item, error) {
 	return items, nil
 }
 
-func (t *Table) getByFkLocked(fk string) ([]Item, error) {
+func (t *Table) getByFkLocked(fk string) ([]item.Entity, error) {
 	keys := t.Fk[fk]
-	items := make([]Item, 0, len(keys))
+	items := make([]item.Entity, 0, len(keys))
 	for _, key := range keys {
 		b, ok := t.Data[key]
 		if !ok {
 			continue
 		}
-		var item Item
+		var item item.Entity
 		if err := cbor.Unmarshal(b, &item); err != nil {
 			return nil, errors.Join(ErrDecodeValue, err)
 		}

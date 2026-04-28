@@ -9,6 +9,7 @@ import (
 
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/item"
 	"github.com/IsaacDSC/kvs/internal/memdb"
 )
 
@@ -64,7 +65,7 @@ func (s *Store) DB() *memdb.DB { return s.db }
 func (s *Store) AppDB() *db.DB { return db.Wrap(s.db) }
 
 // putLocked appends a Put to the WAL and updates memory. s.mu must be held.
-func (s *Store) putLocked(table string, item memdb.Item) error {
+func (s *Store) putLocked(table string, item item.Entity) error {
 	if table == "" {
 		return ErrEmptyTableName
 	}

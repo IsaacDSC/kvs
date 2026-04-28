@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/IsaacDSC/kvs/internal/item"
 	"github.com/IsaacDSC/kvs/internal/memdb"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -15,21 +16,21 @@ func maxUint64(a, b uint64) uint64 {
 	return b
 }
 
-// decodePutItem restores a Put payload. New records are CBOR of memdb.Item; older WAL
+// decodePutItem restores a Put payload. New records are CBOR of item.Entity; older WAL
 // records store only Value (CBOR of any), with Key/Fk taken from the frame.
-func decodePutItem(e Entry) (memdb.Item, error) {
-	var item memdb.Item
-	if err := cbor.Unmarshal(e.ValueBytes, &item); err == nil && item.Key != "" {
-		if item.Key != e.Key || item.Fk != e.Fk {
-			return memdb.Item{}, fmt.Errorf("store: wal key/fk does not match item")
+func decodePutItem(e Entry) (item.Entity, error) {
+	var i item.Entity
+	if err := cbor.Unmarshal(e.ValueBytes, &i); err == nil && i.Key != "" {
+		if i.Key != e.Key || i.Fk != e.Fk {
+			return item.Entity{}, fmt.Errorf("store: wal key/fk does not match item")
 		}
-		return item, nil
+		return i, nil
 	}
 	var v any
 	if err := cbor.Unmarshal(e.ValueBytes, &v); err != nil {
-		return memdb.Item{}, err
+		return item.Entity{}, err
 	}
-	return memdb.Item{Key: e.Key, Fk: e.Fk, Value: v}, nil
+	return item.Entity{Key: e.Key, Fk: e.Fk, Value: v}, nil
 }
 
 func applyEntry(database *memdb.DB, e Entry) error {

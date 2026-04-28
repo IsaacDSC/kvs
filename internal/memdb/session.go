@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/IsaacDSC/kvs/internal/code"
+	"github.com/IsaacDSC/kvs/internal/item"
 )
 
 // Tx buffers mutations for Table.NewSession until commit (WAL BEGIN…COMMIT) or rollback.
@@ -20,13 +21,13 @@ func newTx(t *Table) *Tx {
 	return &Tx{t: t}
 }
 
-func ptrItem(it Item) *Item {
+func ptrItem(it item.Entity) *item.Entity {
 	c := it
 	return &c
 }
 
 // Set records a put to be applied on successful commit.
-func (x *Tx) Set(item Item) error {
+func (x *Tx) Set(item item.Entity) error {
 	if _, err := code.Encode(item); err != nil {
 		return errors.Join(ErrEncodeValue, err)
 	}
@@ -41,21 +42,21 @@ func (x *Tx) Delete(key string) error {
 }
 
 // Get returns the value visible inside this transaction (replay of ordered on top of the base table).
-func (x *Tx) Get(key string) (Item, error) {
+func (x *Tx) Get(key string) (item.Entity, error) {
 	for i := len(x.ordered) - 1; i >= 0; i-- {
 		m := x.ordered[i]
 		if m.Put != nil && m.Put.Key == key {
 			return *m.Put, nil
 		}
 		if m.DelKey == key {
-			return Item{}, ErrKeyNotFound
+			return item.Entity{}, ErrKeyNotFound
 		}
 	}
 	return x.t.Get(key)
 }
 
 // GetByFk returns items for fk visible inside this transaction.
-func (x *Tx) GetByFk(fk string) ([]Item, error) {
+func (x *Tx) GetByFk(fk string) ([]item.Entity, error) {
 	x.t.mu.RLock()
 	baseKeys := x.t.Fk[fk]
 	x.t.mu.RUnlock()
@@ -75,7 +76,7 @@ func (x *Tx) GetByFk(fk string) ([]Item, error) {
 	}
 	sort.Strings(keys)
 
-	var out []Item
+	var out []item.Entity
 	for _, k := range keys {
 		it, err := x.Get(k)
 		if errors.Is(err, ErrKeyNotFound) {
