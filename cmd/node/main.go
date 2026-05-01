@@ -14,8 +14,12 @@ import (
 	"time"
 
 	"github.com/IsaacDSC/kvs/internal/api"
+	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/fsdb"
+	"github.com/IsaacDSC/kvs/internal/memdb"
 	"github.com/IsaacDSC/kvs/internal/raft"
 	"github.com/IsaacDSC/kvs/internal/raftpb"
+	"github.com/IsaacDSC/kvs/internal/store"
 	"github.com/IsaacDSC/kvs/pkg/httphandler"
 	"google.golang.org/grpc"
 )
@@ -63,6 +67,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Start Database
+	db, err := db.New(memdb.NewDB(), fsdb.NewDb(store.DefaultDataDir))
+	if err != nil {
+		logger.Error("failed to initialize database facade", "error", err)
+		os.Exit(1)
+	}
+
+	defer db.Close()
+
 	// Start GRPC Server
 	grpcSrv := grpc.NewServer()
 	grpcSrv.RegisterService(&raftpb.ServiceDesc, raft.NewGRPCServer(node))
@@ -85,6 +98,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	routes := []httphandler.Handler{
+		api.CreateTableHandler(node),
 		api.CmdProposeHandler(node),
 		api.StateHandler(node),
 	}
@@ -111,7 +125,10 @@ func main() {
 		for {
 			select {
 			case entry := <-node.Applied():
-				logger.Info("applied entry", "command", entry.Command, "term", entry.Term)
+				logger.Info("applied entry", "command", entry.Data.Cmd, "term", entry.Term)
+				if err := entry.Data.Execute(db); err != nil {
+					logger.Error("failed to execute command", "error", err)
+				}
 			case <-ctx.Done():
 				return
 			}

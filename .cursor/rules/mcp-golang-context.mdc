@@ -1,0 +1,21 @@
+---
+description: Always use golang project context tool first
+alwaysApply: true
+---
+
+# MCP Golang Context First
+
+For any coding task in this project, call `golang_project_context` before proposing or implementing code changes.
+
+## Required flow
+
+1. Call `golang_project_context` first **with default arguments**: pass `{}` (empty object) or omit all optional fields. Do **not** set `workspace_path` to a bare host path (for example `/Users/...` on macOS) when the MCP server runs in Docker or otherwise isolated from that filesystem — it breaks tool execution (`-32603`).
+2. Only pass `workspace_path` when it is a path **inside** the MCP runtime (same mounts/container/workdir as the server). When unsure, use the default invocation only.
+3. Summarize the relevant context returned by the tool (module, Go version, layout, quality signals, guidance).
+4. Use that context as constraints for implementation and review decisions.
+
+## Enforcement
+
+- Do not start implementation before using the tool.
+- If the tool fails, report the failure and ask for retry/next action before proceeding.
+- Keep recommendations aligned with Effective Go and project conventions from `specs/plano-implementacao-mcp-contexto-golang.md`.

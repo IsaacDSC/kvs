@@ -11,6 +11,7 @@ import (
 	"github.com/IsaacDSC/kvs/internal/db"
 	"github.com/IsaacDSC/kvs/internal/item"
 	"github.com/IsaacDSC/kvs/internal/memdb"
+	"github.com/IsaacDSC/kvs/internal/wal"
 )
 
 var ErrEmptyTableName = errors.New("store: empty table name")
@@ -42,18 +43,18 @@ func Open(dir string, opts Options) (*Store, error) {
 	}
 	walPath := filepath.Join(dir, WalFileName)
 	_ = RepairTruncatesTail(walPath)
-	wal, err := openWAL(walPath, opts)
+	log, err := openWAL(walPath, opts)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, db: database, wal: wal, opts: opts}
-	rs := &replayState{db: database, cpSeq: cpSeq}
-	maxSeq, err := wal.Replay(rs.apply)
+	s := &Store{dir: dir, db: database, wal: log, opts: opts}
+	replayer := wal.NewMemDBReplayer(database, cpSeq)
+	maxSeq, err := log.Replay(replayer.Apply)
 	if err != nil {
-		_ = wal.Close()
+		_ = log.Close()
 		return nil, err
 	}
-	s.LastReplayApplied = rs.applied
+	s.LastReplayApplied = replayer.Applied()
 	s.nextSeq = maxUint64(cpSeq, maxSeq)
 	database.SetDurable(&storeDurable{s: s})
 	return s, nil

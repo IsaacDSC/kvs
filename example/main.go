@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -52,4 +53,11 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println("After Delete(1):", afterDelete)
+
+	optimisticTable := users.NewOptimisticLocking(context.TODO())
+	optimisticTable.Set(db.Item{Key: "1", Fk: "team-a", Value: "Alice"}, "1")
+
+	users.NewSession(context.TODO(), func(tx *db.Tx) error {
+		return tx.Set(db.Item{Key: "1", Fk: "team-a", Value: "Alice"})
+	})
 }

@@ -13,7 +13,8 @@ type Db struct {
 }
 
 func NewDb(defaultDir string) *Db {
-	return &Db{defaultDir: defaultDir}
+	tables := make(map[string]*sync.RWMutex)
+	return &Db{defaultDir: defaultDir, tables: tables}
 }
 
 func (db *Db) CreateTable(name string) error {
@@ -33,8 +34,6 @@ func (db *Db) Put(table string, key string, value []byte) error {
 	if err := os.WriteFile(path, value, 0644); err != nil {
 		return fmt.Errorf("write put key file: %w", err)
 	}
-
-	// for _, fk := range  {}
 
 	return nil
 }

@@ -1,9 +1,11 @@
 package raftpb
 
+import "github.com/IsaacDSC/kvs/internal/commands"
+
 // LogEntry is a single entry in the replicated log.
 type LogEntry struct {
-	Term    int32  `json:"term"`
-	Command string `json:"command"`
+	Term int32         `json:"term"`
+	Data commands.Data `json:"data"`
 }
 
 // VoteRequest is sent by a Candidate to request a vote (§5.2).
