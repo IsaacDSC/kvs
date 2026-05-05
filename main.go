@@ -22,10 +22,10 @@ func main() {
 
 	fmt.Println(table.GetByFk("user_id"))
 
-	if err := table.Set(db.Item{Key: "1", Fk: "user_id", Value: "John Doe"}); err != nil {
+	if err := table.Set(db.Item{Key: "1", SK: "user_id", Value: "John Doe"}); err != nil {
 		panic(err)
 	}
-	if err := table.Set(db.Item{Key: "2", Fk: "user_id", Value: "Jane Doe"}); err != nil {
+	if err := table.Set(db.Item{Key: "2", SK: "user_id", Value: "Jane Doe"}); err != nil {
 		panic(err)
 	}
 	fmt.Println(table.Get("1"))
@@ -35,7 +35,7 @@ func main() {
 	}
 	fmt.Println(table.Get("1"))
 	fmt.Println(table.GetByFk("user_id"))
-	if err := table.Set(db.Item{Key: "1", Fk: "user_id", Value: "John Doe"}); err != nil {
+	if err := table.Set(db.Item{Key: "1", SK: "user_id", Value: "John Doe"}); err != nil {
 		panic(err)
 	}
 
@@ -46,7 +46,7 @@ func main() {
 	fmt.Println("items:", items)
 	for _, item := range items {
 		n := item.Value.(string) + "!!!"
-		if err := table.Set(db.Item{Key: item.Key, Fk: item.Fk, Value: n}); err != nil {
+		if err := table.Set(db.Item{Key: item.Key, SK: item.SK, Value: n}); err != nil {
 			panic(err)
 		}
 	}

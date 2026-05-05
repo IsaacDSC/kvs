@@ -43,7 +43,7 @@ func TestReopenRecoversPuts(t *testing.T) {
 	tb0 := s.DB().GetOrCreateTable("users")
 	for i := 0; i < 20; i++ {
 		key := strconv.Itoa(i)
-		if err := tb0.Set(item.Entity{Key: key, Fk: "g", Value: key + "-v"}); err != nil {
+		if err := tb0.Set(item.Entity{Key: key, SK: "g", Value: key + "-v"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -76,8 +76,8 @@ func TestReopenRecoversDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	tbd := s.DB().GetOrCreateTable("t")
-	_ = tbd.Set(item.Entity{Key: "a", Fk: "x", Value: "1"})
-	_ = tbd.Set(item.Entity{Key: "b", Fk: "x", Value: "2"})
+	_ = tbd.Set(item.Entity{Key: "a", SK: "x", Value: "1"})
+	_ = tbd.Set(item.Entity{Key: "b", SK: "x", Value: "2"})
 	if err := tbd.Delete("a"); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestOptimisticPutPersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	tbw := s.DB().GetOrCreateTable("t")
-	if err := tbw.Set(item.Entity{Key: "k", Fk: "f", Value: "before"}); err != nil {
+	if err := tbw.Set(item.Entity{Key: "k", SK: "f", Value: "before"}); err != nil {
 		t.Fatal(err)
 	}
 	item, err := s.DB().GetOrCreateTable("t").Get("k")
@@ -145,7 +145,7 @@ func TestSessionPersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	tbp := s.DB().GetOrCreateTable("t")
-	if err := tbp.Set(item.Entity{Key: "k", Fk: "f", Value: "a"}); err != nil {
+	if err := tbp.Set(item.Entity{Key: "k", SK: "f", Value: "a"}); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -183,10 +183,10 @@ func TestOptimisticDeletePersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	tbo := s.DB().GetOrCreateTable("t")
-	if err := tbo.Set(item.Entity{Key: "k", Fk: "f", Value: "x", Version: "v1"}); err != nil {
+	if err := tbo.Set(item.Entity{Key: "k", SK: "f", Value: "x", Version: "v1"}); err != nil {
 		t.Fatal(err)
 	}
-	item := item.Entity{Key: "k", Fk: "f", Value: "x", Version: "v1"}
+	item := item.Entity{Key: "k", SK: "f", Value: "x", Version: "v1"}
 	tb := s.DB().GetOrCreateTable("t")
 	res := tb.OptimisticDelete(context.Background(), item, "v1")
 	if err := res.Err(); err != nil {
@@ -213,7 +213,7 @@ func TestCorruptTailTruncatedOnOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	tbc := s.DB().GetOrCreateTable("t")
-	if err := tbc.Set(item.Entity{Key: "k", Fk: "f", Value: "v42"}); err != nil {
+	if err := tbc.Set(item.Entity{Key: "k", SK: "f", Value: "v42"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -260,7 +260,7 @@ func TestSyncEveryWriteAfterSyncCount(t *testing.T) {
 	defer s.Close()
 	tbs := s.DB().GetOrCreateTable("t")
 	for i := 0; i < 4; i++ {
-		if err := tbs.Set(item.Entity{Key: strconv.Itoa(i), Fk: "x", Value: i}); err != nil {
+		if err := tbs.Set(item.Entity{Key: strconv.Itoa(i), SK: "x", Value: i}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -279,7 +279,7 @@ func TestBufferedCommitTransactionFlushes(t *testing.T) {
 	defer s.Close()
 	tb := s.DB().GetOrCreateTable("t")
 	err = tb.NewSession(context.Background(), func(tx *memdb.Tx) error {
-		return tx.Set(item.Entity{Key: "k", Fk: "x", Value: 1})
+		return tx.Set(item.Entity{Key: "k", SK: "x", Value: 1})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +298,7 @@ func TestBufferedSyncsOnFlushAndClose(t *testing.T) {
 	}
 	tbf := s.DB().GetOrCreateTable("t")
 	for i := 0; i < 3; i++ {
-		if err := tbf.Set(item.Entity{Key: strconv.Itoa(i), Fk: "x", Value: i}); err != nil {
+		if err := tbf.Set(item.Entity{Key: strconv.Itoa(i), SK: "x", Value: i}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -328,7 +328,7 @@ func TestCheckpointSkipsEarlierWALOnReplay(t *testing.T) {
 	}
 	tblW := s.DB().GetOrCreateTable("tbl")
 	for i := 0; i < 10; i++ {
-		if err := tblW.Set(item.Entity{Key: strconv.Itoa(i), Fk: "x", Value: i}); err != nil {
+		if err := tblW.Set(item.Entity{Key: strconv.Itoa(i), SK: "x", Value: i}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -347,7 +347,7 @@ func TestCheckpointSkipsEarlierWALOnReplay(t *testing.T) {
 		t.Fatalf("after checkpoint reopen should apply 0 wal tail, got %d", s2.LastReplayApplied)
 	}
 	tbl2 := s2.DB().GetOrCreateTable("tbl")
-	if err := tbl2.Set(item.Entity{Key: "extra", Fk: "x", Value: 99}); err != nil {
+	if err := tbl2.Set(item.Entity{Key: "extra", SK: "x", Value: 99}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s2.Close(); err != nil {
@@ -388,8 +388,8 @@ func TestMultiTableIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = s.DB().GetOrCreateTable("a").Set(item.Entity{Key: "1", Fk: "x", Value: "a1"})
-	_ = s.DB().GetOrCreateTable("b").Set(item.Entity{Key: "1", Fk: "y", Value: "b1"})
+	_ = s.DB().GetOrCreateTable("a").Set(item.Entity{Key: "1", SK: "x", Value: "a1"})
+	_ = s.DB().GetOrCreateTable("b").Set(item.Entity{Key: "1", SK: "y", Value: "b1"})
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -414,10 +414,10 @@ func TestCommitTransactionReopen(t *testing.T) {
 	}
 	tb := s.DB().GetOrCreateTable("t")
 	err = tb.NewSession(context.Background(), func(tx *memdb.Tx) error {
-		if err := tx.Set(item.Entity{Key: "a", Fk: "x", Value: "1"}); err != nil {
+		if err := tx.Set(item.Entity{Key: "a", SK: "x", Value: "1"}); err != nil {
 			return err
 		}
-		return tx.Set(item.Entity{Key: "b", Fk: "x", Value: "2"})
+		return tx.Set(item.Entity{Key: "b", SK: "x", Value: "2"})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -448,7 +448,7 @@ func TestReplayDiscardsIncompleteTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DB().GetOrCreateTable("t").Set(item.Entity{Key: "base", Fk: "x", Value: "ok"}); err != nil {
+	if err := s.DB().GetOrCreateTable("t").Set(item.Entity{Key: "base", SK: "x", Value: "ok"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -462,7 +462,7 @@ func TestReplayDiscardsIncompleteTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	val, err := code.Encode(item.Entity{Key: "orphan", Fk: "x", Value: "bad"})
+	val, err := code.Encode(item.Entity{Key: "orphan", SK: "x", Value: "bad"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func readFile(t *testing.T, path string) []byte {
 func TestDoubleReopenIdempotentState(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir, Options{Durability: SyncEveryWrite})
-	_ = s.DB().GetOrCreateTable("t").Set(item.Entity{Key: "k", Fk: "f", Value: "v"})
+	_ = s.DB().GetOrCreateTable("t").Set(item.Entity{Key: "k", SK: "f", Value: "v"})
 	_ = s.Close()
 	s2, _ := Open(dir, Options{Durability: SyncEveryWrite})
 	_ = s2.Close()

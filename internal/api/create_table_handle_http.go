@@ -4,12 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/IsaacDSC/kvs/internal/commands"
-	"github.com/IsaacDSC/kvs/pkg/httphandler"
+	"github.com/IsaacDSC/kvs/pkg/www"
 )
 
-type CreateTableNode interface {
-	ProposeCommand(command commands.Data) error
+type Db interface {
+	CreateTable(table string) error
 }
 
 type createTableInput struct {
@@ -20,8 +19,8 @@ type createTableOutput struct {
 	TableName string `json:"table_name"`
 }
 
-func CreateTableHandler(node CreateTableNode) httphandler.Handler {
-	return httphandler.Handler{
+func CreateTableHandler(db Db) www.Handler {
+	return www.Handler{
 		Pattern: "POST /table",
 		Fn: func(w http.ResponseWriter, r *http.Request) {
 			var input createTableInput
@@ -30,13 +29,8 @@ func CreateTableHandler(node CreateTableNode) httphandler.Handler {
 				return
 			}
 
-			cmdData := commands.Data{
-				Cmd:       commands.CreateTableCmd,
-				TableName: input.TableName,
-			}
-
-			if err := node.ProposeCommand(cmdData); err != nil {
-				http.Error(w, err.Error(), http.StatusConflict)
+			if err := db.CreateTable(input.TableName); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 

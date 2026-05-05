@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/IsaacDSC/kvs/pkg/httphandler"
+	"github.com/IsaacDSC/kvs/pkg/www"
 )
 
 type CmdProposeNode interface {
@@ -46,8 +46,8 @@ type req struct {
    GET /{tableName}/{key}
    GET /{tableName}/{fk}
 */
-func CmdProposeHandler(node CmdProposeNode) httphandler.Handler {
-	return httphandler.Handler{
+func CmdProposeHandler(node CmdProposeNode) www.Handler {
+	return www.Handler{
 		Pattern: "POST /cmd/propose",
 		Fn: func(w http.ResponseWriter, r *http.Request) {
 			var input req

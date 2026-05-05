@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/IsaacDSC/kvs/internal/memdb"
+	"github.com/IsaacDSC/kvs/internal/old/memdb"
 	"github.com/fxamacker/cbor/v2"
 )
 

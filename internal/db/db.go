@@ -2,7 +2,7 @@ package db
 
 import (
 	"github.com/IsaacDSC/kvs/internal/item"
-	"github.com/IsaacDSC/kvs/internal/memdb"
+	"github.com/IsaacDSC/kvs/internal/old/memdb"
 )
 
 // Item and Table are aliases so callers can use the db package without importing memdb.

@@ -1,171 +1,114 @@
 package memdb
 
 import (
-	"errors"
+	"fmt"
+	"slices"
 	"sync"
-
-	"github.com/fxamacker/cbor/v2"
 
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/item"
 )
 
-// VirtualTable stores values as CBOR bytes; the public Table API still uses any.
-type VirtualTable struct {
-	Data map[string][]byte
-	Fk   map[string][]string
-}
-
 type Table struct {
-	mu sync.RWMutex
-	VirtualTable
-	Session map[int]VirtualTable
-	name    string
-	durable DurableWriter
-
-	sessionOnce sync.Once
-	sessionSem  chan struct{}
+	mu           sync.RWMutex
+	Data         map[string][]byte
+	SecondaryKey map[string]Set
 }
 
-func (t *Table) initSessionLock() {
-	t.sessionOnce.Do(func() {
-		t.sessionSem = make(chan struct{}, 1)
-		t.sessionSem <- struct{}{}
+type Set []string
+
+func (s Set) Add(key string) Set {
+	if slices.Contains(s, key) {
+		return s
+	}
+	return append(s, key)
+}
+
+func (s Set) Remove(key string) Set {
+	return slices.DeleteFunc(s, func(s string) bool {
+		return s == key
 	})
 }
 
-// Set inserts or updates item. If the DB is opened via store.Open, this records a WAL entry.
-func (t *Table) Set(item item.Entity) error {
-	if t.durable != nil && t.name != "" {
-		return t.durable.Put(t.name, item)
-	}
+func (t *Table) Set(entity item.Entity) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.addLocked(item)
-}
 
-// ApplyPut updates memory only; used when replaying the WAL or after a WAL append inside the store.
-func (t *Table) ApplyPut(item item.Entity) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.addLocked(item)
-}
-
-func (t *Table) addLocked(item item.Entity) error {
-	b, err := code.Encode(item)
+	b, err := code.Encode(entity)
 	if err != nil {
-		return errors.Join(ErrEncodeValue, err)
+		return fmt.Errorf("memdb.set error on encoding entity: %w", err)
 	}
-	t.Data[item.Key] = b
-	for _, k := range t.Fk[item.Fk] {
-		if k == item.Key {
-			return nil
-		}
+
+	t.Data[entity.Key] = b
+
+	if entity.SK != "" {
+		set := t.SecondaryKey[entity.SK]
+		t.SecondaryKey[entity.SK] = set.Add(entity.Key)
 	}
-	t.Fk[item.Fk] = append(t.Fk[item.Fk], item.Key)
+
 	return nil
 }
 
 func (t *Table) Get(key string) (item.Entity, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.getLocked(key)
-}
 
-func (t *Table) getLocked(key string) (item.Entity, error) {
 	b, ok := t.Data[key]
 	if !ok {
-		return item.Entity{}, ErrKeyNotFound
+		return item.Entity{}, fmt.Errorf("memdb.get error on getting entity: key %s not found", key)
 	}
-	var item item.Entity
-	if err := cbor.Unmarshal(b, &item); err != nil {
-		return item, errors.Join(ErrDecodeValue, err)
+
+	var entity item.Entity
+	if err := code.DecodeItem(b, &entity); err != nil {
+		return item.Entity{}, fmt.Errorf("memdb.get error on decoding entity: %w", err)
 	}
-	return item, nil
+
+	return entity, nil
 }
 
-func (t *Table) GetByFk(fk string) ([]item.Entity, error) {
+func (t *Table) GetBySecondaryKey(sk string) ([]item.Entity, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	items, err := t.getByFkLocked(fk)
-	if err != nil {
-		return nil, err
+	keys := t.SecondaryKey[sk]
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("memdb.get by secondary key error on getting entities: secondary key %s not found", sk)
 	}
-	if len(items) == 0 {
-		return nil, ErrKeyNotFound
-	}
-	return items, nil
-}
 
-func (t *Table) getByFkLocked(fk string) ([]item.Entity, error) {
-	keys := t.Fk[fk]
-	items := make([]item.Entity, 0, len(keys))
+	entities := make([]item.Entity, 0, len(keys))
 	for _, key := range keys {
-		b, ok := t.Data[key]
-		if !ok {
-			continue
+		entity, err := t.Get(key)
+		if err != nil {
+			return nil, fmt.Errorf("memdb.get by secondary key error on getting entities: %w", err)
 		}
-		var item item.Entity
-		if err := cbor.Unmarshal(b, &item); err != nil {
-			return nil, errors.Join(ErrDecodeValue, err)
-		}
-		items = append(items, item)
+		entities = append(entities, entity)
 	}
-	return items, nil
+
+	return entities, nil
 }
 
-// Delete removes key. If the DB is opened via store.Open, this records a WAL delete.
 func (t *Table) Delete(key string) error {
-	if t.durable != nil && t.name != "" {
-		return t.durable.Delete(t.name, key)
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.deleteLocked(key)
-	return nil
-}
-
-// ApplyDelete removes key from memory only; used when replaying the WAL or after a WAL append inside the store.
-func (t *Table) ApplyDelete(key string) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.deleteLocked(key)
-	return nil
-}
-
-// ExportMaps returns deep copies of Data and Fk for checkpointing.
-func (t *Table) ExportMaps() (data map[string][]byte, fk map[string][]string) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	data = make(map[string][]byte, len(t.Data))
-	for k, v := range t.Data {
-		vv := make([]byte, len(v))
-		copy(vv, v)
-		data[k] = vv
+	b, ok := t.Data[key]
+	if !ok {
+		return fmt.Errorf("memdb.delete error on deleting entity: key %s not found", key)
 	}
-	fk = make(map[string][]string, len(t.Fk))
-	for k, v := range t.Fk {
-		sl := make([]string, len(v))
-		copy(sl, v)
-		fk[k] = sl
-	}
-	return data, fk
-}
 
-func (t *Table) deleteLocked(key string) {
+	var entity item.Entity
+	if err := code.DecodeItem(b, &entity); err != nil {
+		return fmt.Errorf("memdb.delete error on decoding entity: %w", err)
+	}
+
 	delete(t.Data, key)
 
-	for fk, keys := range t.Fk {
-		out := keys[:0]
-		for _, k := range keys {
-			if k != key {
-				out = append(out, k)
-			}
-		}
-		if len(out) == 0 {
-			delete(t.Fk, fk)
+	if entity.SK != "" {
+		set := t.SecondaryKey[entity.SK]
+		if len(set) == 1 {
+			delete(t.SecondaryKey, entity.SK)
 		} else {
-			t.Fk[fk] = out
+			t.SecondaryKey[entity.SK] = set.Remove(key)
 		}
 	}
+
+	return nil
 }

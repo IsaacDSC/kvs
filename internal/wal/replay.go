@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/IsaacDSC/kvs/internal/item"
-	"github.com/IsaacDSC/kvs/internal/memdb"
+	"github.com/IsaacDSC/kvs/internal/old/memdb"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -94,7 +94,7 @@ func (r *MemDBReplayer) Applied() int {
 func decodePutItem(e Entry) (item.Entity, error) {
 	var i item.Entity
 	if err := cbor.Unmarshal(e.ValueBytes, &i); err == nil && i.Key != "" {
-		if i.Key != e.Key || i.Fk != e.Fk {
+		if i.Key != e.Key || i.SK != e.Fk {
 			return item.Entity{}, errors.New("wal: key/fk mismatch with payload")
 		}
 		return i, nil
@@ -103,7 +103,7 @@ func decodePutItem(e Entry) (item.Entity, error) {
 	if err := cbor.Unmarshal(e.ValueBytes, &v); err != nil {
 		return item.Entity{}, err
 	}
-	return item.Entity{Key: e.Key, Fk: e.Fk, Value: v}, nil
+	return item.Entity{Key: e.Key, SK: e.Fk, Value: v}, nil
 }
 
 func applyEntry(database *memdb.DB, e Entry) error {

@@ -155,6 +155,7 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs, reply *AppendEntriesR
 	reply.Success = true
 
 }
+
 func (n *Node) ProposeCommand(command commands.Data) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()

@@ -9,8 +9,9 @@ import (
 
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/durable"
 	"github.com/IsaacDSC/kvs/internal/item"
-	"github.com/IsaacDSC/kvs/internal/memdb"
+	"github.com/IsaacDSC/kvs/internal/old/memdb"
 	"github.com/IsaacDSC/kvs/internal/wal"
 )
 
@@ -37,7 +38,7 @@ func Open(dir string, opts Options) (*Store, error) {
 		return nil, err
 	}
 	database := memdb.NewDB()
-	cpSeq, err := loadCheckpoint(dir, database)
+	cpSeq, err := durable.LoadCheckpoint(dir, database)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +76,7 @@ func (s *Store) putLocked(table string, item item.Entity) error {
 		return err
 	}
 	seq := s.nextSeq + 1
-	e := Entry{Seq: seq, Op: OpPut, Table: table, Key: item.Key, Fk: item.Fk, ValueBytes: b}
+	e := Entry{Seq: seq, Op: OpPut, Table: table, Key: item.Key, Fk: item.SK, ValueBytes: b}
 	if err := s.wal.Append(e); err != nil {
 		return err
 	}
@@ -103,7 +104,7 @@ func (s *Store) deleteLocked(table, key string) error {
 func (s *Store) Checkpoint() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return saveCheckpoint(s.dir, s.db, s.nextSeq)
+	return durable.SaveCheckpoint(s.dir, s.db, s.nextSeq)
 }
 
 // Flush durably writes buffered WAL data.
@@ -175,7 +176,7 @@ func (s *Store) commitTransactionLocked(table string, muts []memdb.TxMutation) e
 			}
 			e := Entry{
 				Seq: seq, Op: OpPut, Table: table,
-				Key: m.Put.Key, Fk: m.Put.Fk, ValueBytes: b,
+				Key: m.Put.Key, Fk: m.Put.SK, ValueBytes: b,
 			}
 			if err := appendFrame(e); err != nil {
 				return err

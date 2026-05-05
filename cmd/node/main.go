@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log/slog"
 	"net"
@@ -20,7 +19,7 @@ import (
 	"github.com/IsaacDSC/kvs/internal/raft"
 	"github.com/IsaacDSC/kvs/internal/raftpb"
 	"github.com/IsaacDSC/kvs/internal/store"
-	"github.com/IsaacDSC/kvs/pkg/httphandler"
+	"github.com/IsaacDSC/kvs/pkg/www"
 	"google.golang.org/grpc"
 )
 
@@ -68,7 +67,7 @@ func main() {
 	defer stop()
 
 	// Start Database
-	db, err := db.New(memdb.NewDB(), fsdb.NewDb(store.DefaultDataDir))
+	db, err := db.New(memdb.NewDB(), fsdb.NewDb(store.DefaultDataDir), node)
 	if err != nil {
 		logger.Error("failed to initialize database facade", "error", err)
 		os.Exit(1)
@@ -97,8 +96,11 @@ func main() {
 	// Start HTTP Server
 	mux := http.NewServeMux()
 
-	routes := []httphandler.Handler{
-		api.CreateTableHandler(node),
+	routes := []www.Handler{
+		api.CreateTableHandler(db),
+		api.PutHandler(db),
+		api.GetHandler(db),
+		api.GetBySecondaryKeyHandler(db),
 		api.CmdProposeHandler(node),
 		api.StateHandler(node),
 	}
@@ -125,10 +127,11 @@ func main() {
 		for {
 			select {
 			case entry := <-node.Applied():
-				logger.Info("applied entry", "command", entry.Data.Cmd, "term", entry.Term)
-				if err := entry.Data.Execute(db); err != nil {
-					logger.Error("failed to execute command", "error", err)
-				}
+				// TODO: validar se o publicador é o mesmo que leu, não precisaria
+				logger.Info("applied entry", "command", entry.Data.Cmd, "term", entry.Term, "state", node.State())
+				// if err := entry.Data.Execute(db); err != nil {
+				// 	logger.Error("failed to execute command", "error", err)
+				// }
 			case <-ctx.Done():
 				return
 			}
@@ -164,10 +167,6 @@ func main() {
 type Peers []string
 
 func NewPeers(raw string) (Peers, error) {
-	if raw == "" {
-		return nil, errors.New("empty peers")
-	}
-
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {

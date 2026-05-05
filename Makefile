@@ -1,4 +1,4 @@
-.PHONY: help proto
+.PHONY: help proto build run-single-node run1 run2 run3 state1 state2 state3 propose
 
 # Alvo padrão: exibe a ajuda
 .DEFAULT_GOAL := help
@@ -19,6 +19,15 @@ proto:
 	$(PROTOC) --go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		proto/raft/raft.proto
+
+build:
+	go build ./...
+
+# Single node leader
+run-single-node: build
+	go run ./cmd/node/main.go -id node1 \
+	           -grpc-addr :9001 -http-addr :8001 \
+	           -peers ""
 
 # ── Cluster (open one terminal per target) ─────────────────────────────────
 # Node-to-node RPCs use gRPC on ports 9001/9002/9003.
@@ -66,5 +75,14 @@ propose:
 
 help:
 	@echo "Comandos disponíveis:"
+	@echo "  make build          - Compila o projeto (go build ./...)"
+	@echo "  make run-single-node - Sobe 1 nó (HTTP :8001 / gRPC :9001)"
+	@echo "  make run1           - Sobe o node1 (HTTP :8001 / gRPC :9001)"
+	@echo "  make run2           - Sobe o node2 (HTTP :8002 / gRPC :9002)"
+	@echo "  make run3           - Sobe o node3 (HTTP :8003 / gRPC :9003)"
+	@echo "  make state1         - Mostra /state do node1 (requer jq)"
+	@echo "  make state2         - Mostra /state do node2 (requer jq)"
+	@echo "  make state3         - Mostra /state do node3 (requer jq)"
+	@echo "  make propose        - POST /cmd/propose (ADDR=... CMD=...)"
 	@echo "  make proto  - Gera código Go e gRPC a partir de proto/raft/raft.proto"
 	@echo "  make help   - Mostra esta ajuda (é o alvo padrão ao rodar 'make' sem argumentos)"
