@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/IsaacDSC/kvs/internal/node"
-	"github.com/IsaacDSC/kvs/pkg/httphandler"
+	"github.com/IsaacDSC/kvs/pkg/www"
 )
 
 type StateNode interface {
@@ -30,8 +30,8 @@ func NewNodeStateResponse(state node.State) NodeStateResponse {
 	}
 }
 
-func StateHandler(node StateNode) httphandler.Handler {
-	return httphandler.Handler{
+func StateHandler(node StateNode) www.Handler {
+	return www.Handler{
 		Pattern: "GET /state",
 		Fn: func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")

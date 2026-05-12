@@ -1,6 +1,11 @@
 package memdb
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+
+	"github.com/IsaacDSC/kvs/internal/item"
+)
 
 type DB struct {
 	Tables  map[string]*Table
@@ -12,6 +17,17 @@ func NewDB() *DB {
 	return &DB{
 		Tables: make(map[string]*Table),
 	}
+}
+
+func (db *DB) Set(tableName string, entity item.Entity) error {
+	db.Lock.Lock()
+	defer db.Lock.Unlock()
+	table, ok := db.Tables[tableName]
+	if !ok {
+		return fmt.Errorf("table %s not found", tableName)
+	}
+
+	return table.Set(entity)
 }
 
 // SetDurable wires all tables (existing and future) so Set/Delete go through w.

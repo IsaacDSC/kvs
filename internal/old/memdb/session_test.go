@@ -18,7 +18,7 @@ func TestNewSessionSuccess(t *testing.T) {
 		},
 		Session: make(map[int]VirtualTable),
 	}
-	_ = tb.Set(item.Entity{Key: "k", Fk: "f", Value: "v"})
+	_ = tb.Set(item.Entity{Key: "k", SK: "f", Value: "v"})
 
 	ctx := context.Background()
 	err := tb.NewSession(ctx, func(tx *Tx) error {
@@ -27,7 +27,7 @@ func TestNewSessionSuccess(t *testing.T) {
 			return err
 		}
 		s := i.Value.(string)
-		return tx.Set(item.Entity{Key: "k", Fk: "f", Value: s + "!"})
+		return tx.Set(item.Entity{Key: "k", SK: "f", Value: s + "!"})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestNewSessionMemoryOnlyCommit(t *testing.T) {
 	}
 	ctx := context.Background()
 	err := tb.NewSession(ctx, func(tx *Tx) error {
-		return tx.Set(item.Entity{Key: "k", Fk: "f", Value: "v"})
+		return tx.Set(item.Entity{Key: "k", SK: "f", Value: "v"})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -172,11 +172,11 @@ func TestNewSessionRollbackOnError(t *testing.T) {
 		},
 		Session: make(map[int]VirtualTable),
 	}
-	_ = tb.Set(item.Entity{Key: "k", Fk: "f", Value: "old"})
+	_ = tb.Set(item.Entity{Key: "k", SK: "f", Value: "old"})
 	ctx := context.Background()
 	want := errors.New("fail")
 	err := tb.NewSession(ctx, func(tx *Tx) error {
-		if err := tx.Set(item.Entity{Key: "k", Fk: "f", Value: "new"}); err != nil {
+		if err := tx.Set(item.Entity{Key: "k", SK: "f", Value: "new"}); err != nil {
 			return err
 		}
 		return want
@@ -198,10 +198,10 @@ func TestNewSessionGetByFkStaging(t *testing.T) {
 		},
 		Session: make(map[int]VirtualTable),
 	}
-	_ = tb.Set(item.Entity{Key: "a", Fk: "g", Value: "1"})
+	_ = tb.Set(item.Entity{Key: "a", SK: "g", Value: "1"})
 	ctx := context.Background()
 	err := tb.NewSession(ctx, func(tx *Tx) error {
-		if err := tx.Set(item.Entity{Key: "b", Fk: "g", Value: "2"}); err != nil {
+		if err := tx.Set(item.Entity{Key: "b", SK: "g", Value: "2"}); err != nil {
 			return err
 		}
 		items, err := tx.GetByFk("g")

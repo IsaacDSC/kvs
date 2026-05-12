@@ -46,7 +46,7 @@ func (s *GRPCServer) Replicate(stream *raftpb.FollowerStream) error {
 
 		entries := make([]LogEntry, len(req.Entries))
 		for i, e := range req.Entries {
-			entries[i] = LogEntry{Term: int(e.Term), Command: e.Command}
+			entries[i] = LogEntry{Term: int(e.Term), Data: e.Data}
 		}
 
 		args := AppendEntriesArgs{

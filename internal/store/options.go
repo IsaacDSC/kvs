@@ -1,21 +1,19 @@
 package store
 
+import "github.com/IsaacDSC/kvs/internal/wal"
+
 // Durability controls how WAL writes reach stable storage.
-type Durability int
+type Durability = wal.Durability
 
 const (
 	// SyncEveryWrite calls fsync after each WAL append (slowest, strongest single-node durability).
-	SyncEveryWrite Durability = iota
+	SyncEveryWrite = wal.SyncEveryWrite
 	// Buffered keeps writes in memory until Flush or Close (weaker until flush).
-	Buffered
+	Buffered = wal.Buffered
 )
 
 // Options configures a Store and its WAL.
-type Options struct {
-	Durability Durability
-	// AfterSync is invoked after each successful WAL fsync (SyncEveryWrite or Flush). Optional, for tests.
-	AfterSync func()
-}
+type Options = wal.Options
 
 // DefaultDataDir is the conventional directory name under the process working directory ("./tmp").
 const DefaultDataDir = "tmp"

@@ -9,8 +9,10 @@ import (
 
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/durable"
 	"github.com/IsaacDSC/kvs/internal/item"
-	"github.com/IsaacDSC/kvs/internal/memdb"
+	"github.com/IsaacDSC/kvs/internal/old/memdb"
+	"github.com/IsaacDSC/kvs/internal/wal"
 )
 
 var ErrEmptyTableName = errors.New("store: empty table name")
@@ -36,24 +38,24 @@ func Open(dir string, opts Options) (*Store, error) {
 		return nil, err
 	}
 	database := memdb.NewDB()
-	cpSeq, err := loadCheckpoint(dir, database)
+	cpSeq, err := durable.LoadCheckpoint(dir, database)
 	if err != nil {
 		return nil, err
 	}
 	walPath := filepath.Join(dir, WalFileName)
 	_ = RepairTruncatesTail(walPath)
-	wal, err := openWAL(walPath, opts)
+	log, err := openWAL(walPath, opts)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, db: database, wal: wal, opts: opts}
-	rs := &replayState{db: database, cpSeq: cpSeq}
-	maxSeq, err := wal.Replay(rs.apply)
+	s := &Store{dir: dir, db: database, wal: log, opts: opts}
+	replayer := wal.NewMemDBReplayer(database, cpSeq)
+	maxSeq, err := log.Replay(replayer.Apply)
 	if err != nil {
-		_ = wal.Close()
+		_ = log.Close()
 		return nil, err
 	}
-	s.LastReplayApplied = rs.applied
+	s.LastReplayApplied = replayer.Applied()
 	s.nextSeq = maxUint64(cpSeq, maxSeq)
 	database.SetDurable(&storeDurable{s: s})
 	return s, nil
@@ -62,7 +64,7 @@ func Open(dir string, opts Options) (*Store, error) {
 func (s *Store) DB() *memdb.DB { return s.db }
 
 // AppDB returns a façade over the in-memory database (forward-only; see internal/db).
-func (s *Store) AppDB() *db.DB { return db.Wrap(s.db) }
+func (s *Store) AppDB() *db.OldDb { return db.Wrap(s.db) }
 
 // putLocked appends a Put to the WAL and updates memory. s.mu must be held.
 func (s *Store) putLocked(table string, item item.Entity) error {
@@ -74,7 +76,7 @@ func (s *Store) putLocked(table string, item item.Entity) error {
 		return err
 	}
 	seq := s.nextSeq + 1
-	e := Entry{Seq: seq, Op: OpPut, Table: table, Key: item.Key, Fk: item.Fk, ValueBytes: b}
+	e := Entry{Seq: seq, Op: OpPut, Table: table, Key: item.Key, Fk: item.SK, ValueBytes: b}
 	if err := s.wal.Append(e); err != nil {
 		return err
 	}
@@ -102,7 +104,7 @@ func (s *Store) deleteLocked(table, key string) error {
 func (s *Store) Checkpoint() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return saveCheckpoint(s.dir, s.db, s.nextSeq)
+	return durable.SaveCheckpoint(s.dir, s.db, s.nextSeq)
 }
 
 // Flush durably writes buffered WAL data.
@@ -174,7 +176,7 @@ func (s *Store) commitTransactionLocked(table string, muts []memdb.TxMutation) e
 			}
 			e := Entry{
 				Seq: seq, Op: OpPut, Table: table,
-				Key: m.Put.Key, Fk: m.Put.Fk, ValueBytes: b,
+				Key: m.Put.Key, Fk: m.Put.SK, ValueBytes: b,
 			}
 			if err := appendFrame(e); err != nil {
 				return err

@@ -66,7 +66,7 @@ func (x *Tx) GetByFk(fk string) ([]item.Entity, error) {
 		candidates[k] = struct{}{}
 	}
 	for _, m := range x.ordered {
-		if m.Put != nil && m.Put.Fk == fk {
+		if m.Put != nil && m.Put.SK == fk {
 			candidates[m.Put.Key] = struct{}{}
 		}
 	}
@@ -85,7 +85,7 @@ func (x *Tx) GetByFk(fk string) ([]item.Entity, error) {
 		if err != nil {
 			return nil, err
 		}
-		if it.Fk == fk {
+		if it.SK == fk {
 			out = append(out, it)
 		}
 	}

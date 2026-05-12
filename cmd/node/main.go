@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log/slog"
 	"net"
@@ -14,10 +13,22 @@ import (
 	"time"
 
 	"github.com/IsaacDSC/kvs/internal/api"
+	"github.com/IsaacDSC/kvs/internal/code"
+	"github.com/IsaacDSC/kvs/internal/commands"
+	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/fsdb"
+	"github.com/IsaacDSC/kvs/internal/memdb"
 	"github.com/IsaacDSC/kvs/internal/raft"
 	"github.com/IsaacDSC/kvs/internal/raftpb"
-	"github.com/IsaacDSC/kvs/pkg/httphandler"
+	"github.com/IsaacDSC/kvs/internal/store"
+	"github.com/IsaacDSC/kvs/internal/wal"
+	"github.com/IsaacDSC/kvs/pkg/www"
 	"google.golang.org/grpc"
+)
+
+const (
+	defaultDir     = "tmp"
+	defaultDataDir = "tmp/data.wal"
 )
 
 // go run cmd/node/main.go -id 1 -addrs 127.0.0.1:8080 -peers 127.0.0.1:8081,127.0.0.1:8082
@@ -32,6 +43,7 @@ func main() {
 	peersRaw := flag.String("peers", "", "node peers")
 	// grpc addr
 	grpcAddr := flag.String("grpc-addr", ":9080", "gRPC listen address for node-to-node RPCs (e.g. :9001)")
+	memdbMaxEntries := flag.Int("memdb-max-entries", 0, "max entries per in-memory table (0=unlimited); LRU eviction applies when set")
 
 	flag.Parse()
 
@@ -63,6 +75,27 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		logger.Error("failed to create data dir", "error", err)
+		os.Exit(1)
+	}
+
+	codec := code.NewCBOR()
+
+	wal, err := wal.New(defaultDataDir, wal.Options{Durability: wal.SyncEveryWrite}, codec)
+	if err != nil {
+		panic(err)
+	}
+
+	// Start Database
+	db := db.New(memdb.NewDB(memdb.Options{MaxEntriesPerTable: *memdbMaxEntries}), fsdb.NewDb(store.DefaultDataDir), wal)
+	defer db.Close()
+
+	//  Read the WAL and apply the operations to the database
+	if err := db.Load(ctx); err != nil {
+		panic(err)
+	}
+
 	// Start GRPC Server
 	grpcSrv := grpc.NewServer()
 	grpcSrv.RegisterService(&raftpb.ServiceDesc, raft.NewGRPCServer(node))
@@ -84,8 +117,12 @@ func main() {
 	// Start HTTP Server
 	mux := http.NewServeMux()
 
-	routes := []httphandler.Handler{
-		api.CmdProposeHandler(node),
+	routes := []www.Handler{
+		api.CreateTableHandler(db, node),
+		api.PutHandler(db, node),
+		api.DeleteHandler(db, node),
+		api.GetHandler(db),
+		api.GetBySecondaryKeyHandler(db),
 		api.StateHandler(node),
 	}
 
@@ -104,14 +141,35 @@ func main() {
 	}()
 
 	// Start Raft Node State Machine
-
 	go node.Run(ctx)
 
 	go func() {
 		for {
 			select {
 			case entry := <-node.Applied():
-				logger.Info("applied entry", "command", entry.Command, "term", entry.Term)
+				logger.Info("applied entry", "command", entry.Data.Cmd, "term", entry.Term, "state", node.State())
+
+				if node.State().Role == raft.Follower.String() {
+					switch entry.Data.Cmd {
+					case commands.CreateTableCmd:
+						if err := db.CreateTable(entry.Data.TableName); err != nil {
+							logger.Error("failed to create table", "error", err)
+							os.Exit(1)
+						}
+					case commands.SetCmd:
+						if err := db.Set(ctx, entry.Data.TableName, entry.Data.Item); err != nil {
+							logger.Error("failed to set item", "error", err)
+							os.Exit(1)
+						}
+					case commands.DeleteCmd:
+						if err := db.Delete(ctx, entry.Data.TableName, entry.Data.Item.Key); err != nil {
+							logger.Error("failed to delete item", "error", err)
+							os.Exit(1)
+						}
+
+					}
+				}
+
 			case <-ctx.Done():
 				return
 			}
@@ -147,10 +205,6 @@ func main() {
 type Peers []string
 
 func NewPeers(raw string) (Peers, error) {
-	if raw == "" {
-		return nil, errors.New("empty peers")
-	}
-
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {

@@ -3,20 +3,39 @@
 package code
 
 import (
+	"fmt"
+
 	"github.com/fxamacker/cbor/v2"
 )
+
+type CBOR struct{}
+
+func NewCBOR() *CBOR {
+	return &CBOR{}
+}
+
+func (c *CBOR) Encode(v any) ([]byte, error) {
+	return cbor.Marshal(v)
+}
+
+func (c *CBOR) Decode(data []byte, item any) error {
+	if err := cbor.Unmarshal(data, item); err != nil {
+		return fmt.Errorf("memdb.decode error on decoding item: %w", err)
+	}
+	return nil
+}
 
 // Encode serializes v to CBOR bytes suitable for storing in memory or on disk.
 func Encode(v any) ([]byte, error) {
 	return cbor.Marshal(v)
 }
 
-// Decode restores a value previously produced by Encode into an arbitrary Go value
-// (maps decode as map[interface{}]interface{}). For memdb.Item bytes, unmarshal into Item instead.
-func Decode(data []byte) (any, error) {
-	var v any
-	if err := cbor.Unmarshal(data, &v); err != nil {
-		return nil, err
+// Decode unmarshals CBOR into item (e.g. *item.Entity). Map values in any fields
+// (e.g. Entity.Value) decode as map[interface{}]interface{} — same as cbor.Unmarshal to any.
+func Decode(data []byte, item any) error {
+	if err := cbor.Unmarshal(data, item); err != nil {
+		return fmt.Errorf("memdb.decode error on decoding item: %w", err)
 	}
-	return v, nil
+
+	return nil
 }

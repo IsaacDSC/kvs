@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -24,10 +25,10 @@ func main() {
 
 	users := s.AppDB().GetOrCreateTable("users")
 
-	if err := users.Set(db.Item{Key: "1", Fk: "team-a", Value: "Alice"}); err != nil {
+	if err := users.Set(db.Item{Key: "1", SK: "team-a", Value: "Alice"}); err != nil {
 		log.Fatal(err)
 	}
-	if err := users.Set(db.Item{Key: "2", Fk: "team-a", Value: "Bob"}); err != nil {
+	if err := users.Set(db.Item{Key: "2", SK: "team-a", Value: "Bob"}); err != nil {
 		log.Fatal(err)
 	}
 
@@ -52,4 +53,11 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println("After Delete(1):", afterDelete)
+
+	optimisticTable := users.NewOptimisticLocking(context.TODO())
+	optimisticTable.Set(db.Item{Key: "1", SK: "team-a", Value: "Alice"}, "1")
+
+	users.NewSession(context.TODO(), func(tx *db.Tx) error {
+		return tx.Set(db.Item{Key: "1", SK: "team-a", Value: "Alice"})
+	})
 }

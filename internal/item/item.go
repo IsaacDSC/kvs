@@ -2,7 +2,7 @@ package item
 
 type Entity struct {
 	Key     string
-	Fk      string
+	SK      string
 	Value   any
 	Version string
 }
