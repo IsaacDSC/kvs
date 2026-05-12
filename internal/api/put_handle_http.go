@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/IsaacDSC/kvs/internal/commands"
 	"github.com/IsaacDSC/kvs/internal/item"
 	"github.com/IsaacDSC/kvs/pkg/www"
 )
@@ -75,7 +76,7 @@ type putOutput struct {
 	Value     any    `json:"value"`
 }
 
-func PutHandler(db PutDb) www.Handler {
+func PutHandler(db PutDb, replicateNodes ReplicateNodes) www.Handler {
 	return www.Handler{
 		Pattern: "PUT /table/{tableName}/{key}",
 		Fn: func(w http.ResponseWriter, r *http.Request) {
@@ -101,10 +102,21 @@ func PutHandler(db PutDb) www.Handler {
 				return
 			}
 
-			if err := db.Set(r.Context(), params.TableName, item.Entity{
+			entity := item.Entity{
 				Key:   params.Key,
 				SK:    input.SK,
 				Value: input.Value,
+			}
+
+			if err := db.Set(r.Context(), params.TableName, entity); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			if err := replicateNodes.ProposeCommand(commands.Data{
+				Cmd:       commands.SetCmd,
+				TableName: params.TableName,
+				Item:      entity,
 			}); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return

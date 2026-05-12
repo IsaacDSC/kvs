@@ -64,7 +64,7 @@ func Open(dir string, opts Options) (*Store, error) {
 func (s *Store) DB() *memdb.DB { return s.db }
 
 // AppDB returns a façade over the in-memory database (forward-only; see internal/db).
-func (s *Store) AppDB() *db.DB { return db.Wrap(s.db) }
+func (s *Store) AppDB() *db.OldDb { return db.Wrap(s.db) }
 
 // putLocked appends a Put to the WAL and updates memory. s.mu must be held.
 func (s *Store) putLocked(table string, item item.Entity) error {

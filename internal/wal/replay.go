@@ -69,7 +69,7 @@ func (r *MemDBReplayer) Apply(e Entry) error {
 		r.pendTxID = 0
 		return nil
 
-	case OpPut, OpDel:
+	case OpSet, OpDel:
 		if r.open && e.Table == r.pendTable {
 			r.pending = append(r.pending, e)
 			return nil
@@ -109,7 +109,7 @@ func decodePutItem(e Entry) (item.Entity, error) {
 func applyEntry(database *memdb.DB, e Entry) error {
 	t := database.GetOrCreateTable(e.Table)
 	switch e.Op {
-	case OpPut:
+	case OpSet:
 		it, err := decodePutItem(e)
 		if err != nil {
 			return err

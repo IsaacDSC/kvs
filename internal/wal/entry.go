@@ -22,7 +22,7 @@ const (
 type Op byte
 
 const (
-	OpPut    Op = 1 // insert/overwrite value
+	OpSet    Op = 1 // insert/overwrite value
 	OpDel    Op = 2 // remove key
 	OpBegin  Op = 3 // start transaction (ValueBytes = 8-byte txid BE)
 	OpCommit Op = 4 // commit transaction (ValueBytes = 8-byte txid BE)
@@ -90,7 +90,7 @@ func (e *Entry) MarshalBinary() ([]byte, error) {
 	payload = appendString(payload, e.Key)
 	payload = appendString(payload, e.Fk)
 	switch e.Op {
-	case OpPut:
+	case OpSet:
 		payload = appendU32(payload, uint32(len(e.ValueBytes)))
 		payload = append(payload, e.ValueBytes...)
 	case OpDel:
@@ -186,7 +186,7 @@ func (e *Entry) UnmarshalBinary(data []byte) error {
 	e.ValueBytes = append([]byte(nil), payload[off:off+int(vlen)]...)
 
 	switch e.Op {
-	case OpPut:
+	case OpSet:
 	case OpDel:
 		if len(e.ValueBytes) != 0 {
 			return ErrCorruptRecord

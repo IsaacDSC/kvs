@@ -12,15 +12,15 @@ curl -s -X POST "http://localhost:8001/table" \
 
 ### Creater or update data
 ```sh
-curl -s -X PUT "http://localhost:8001/table/test_tb/123" \
+curl -s -X PUT "http://localhost:8001/table/test_tb/4321id" \
   -H "Content-Type: application/json" \
-  -d '{"sk": "123", "value":{"key": "value"}}'
+  -d '{"sk": "familia", "value":{"key2": "value2"}}'
 ```
 
 ### Get by key 
 
 ```sh
-curl -s -X GET "http://localhost:8001/table/test_tb/123" 
+curl -s -X GET "http://localhost:8001/table/test_tb/1234id" 
 ```
 
 
@@ -28,4 +28,11 @@ curl -s -X GET "http://localhost:8001/table/test_tb/123"
 
 ```sh
 curl -i -X GET "http://localhost:8001/table/test_tb?sk=123" 
+```
+
+### Delete by key
+
+```sh
+curl -i -X DELETE "http://localhost:8001/table/test_tb/123" 
+
 ```

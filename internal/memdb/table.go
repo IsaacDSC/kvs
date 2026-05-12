@@ -2,35 +2,31 @@ package memdb
 
 import (
 	"fmt"
-	"slices"
 	"sync"
 
 	"github.com/IsaacDSC/kvs/internal/code"
+	"github.com/IsaacDSC/kvs/internal/db"
 	"github.com/IsaacDSC/kvs/internal/item"
 )
 
-type Table struct {
-	mu           sync.RWMutex
-	Data         map[string][]byte
-	SecondaryKey map[string]Set
+type table struct {
+	mu sync.Mutex // Reads also mutate LRU state, so the table uses one exclusive lock.
+
+	data         map[string][]byte
+	secondaryKey secondaryKey
+	lru          lruTracker
 }
 
-type Set []string
-
-func (s Set) Add(key string) Set {
-	if slices.Contains(s, key) {
-		return s
+// newTable builds an empty table. LRU tracking is allocated only when maxEntries > 0 (unlimited cache skips list bookkeeping).
+func newTable(maxEntries int) *table {
+	return &table{
+		data:         make(map[string][]byte),
+		secondaryKey: make(map[string]keySet),
+		lru:          newLRUTracker(maxEntries),
 	}
-	return append(s, key)
 }
 
-func (s Set) Remove(key string) Set {
-	return slices.DeleteFunc(s, func(s string) bool {
-		return s == key
-	})
-}
-
-func (t *Table) Set(entity item.Entity) error {
+func (t *table) set(entity item.Entity) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -39,76 +35,109 @@ func (t *Table) Set(entity item.Entity) error {
 		return fmt.Errorf("memdb.set error on encoding entity: %w", err)
 	}
 
-	t.Data[entity.Key] = b
+	// On overwrite, keep SecondaryKey in sync with the stored blob: if the primary key's SK
+	// changes (or is cleared), remove this key from the old SK set before indexing the new SK.
+	if oldB, ok := t.data[entity.Key]; ok {
+		t.secondaryKey.removePreviousIfChanged(entity.Key, oldB, entity.SK)
+	}
 
-	if entity.SK != "" {
-		set := t.SecondaryKey[entity.SK]
-		t.SecondaryKey[entity.SK] = set.Add(entity.Key)
+	t.data[entity.Key] = b
+
+	t.secondaryKey.add(entity.Key, entity.SK)
+
+	t.lru.markRecentlyUsed(entity.Key)
+
+	for t.lru.maxExceeded(len(t.data)) {
+		key, ok := t.lru.leastRecentlyUsed()
+		if !ok {
+			break
+		}
+		b, ok := t.data[key]
+		if !ok {
+			t.lru.remove(key)
+			continue
+		}
+		var evicted item.Entity
+		if err := code.Decode(b, &evicted); err == nil {
+			t.secondaryKey.remove(key, evicted.SK)
+		}
+		delete(t.data, key)
+		t.lru.remove(key)
 	}
 
 	return nil
 }
 
-func (t *Table) Get(key string) (item.Entity, error) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+func (t *table) get(key string) (item.Entity, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	b, ok := t.Data[key]
+	b, ok := t.data[key]
 	if !ok {
-		return item.Entity{}, fmt.Errorf("memdb.get error on getting entity: key %s not found", key)
+		return item.Entity{}, db.ErrNotFound
 	}
 
 	var entity item.Entity
-	if err := code.DecodeItem(b, &entity); err != nil {
+	if err := code.Decode(b, &entity); err != nil {
 		return item.Entity{}, fmt.Errorf("memdb.get error on decoding entity: %w", err)
 	}
+
+	t.lru.markRecentlyUsed(key)
 
 	return entity, nil
 }
 
-func (t *Table) GetBySecondaryKey(sk string) ([]item.Entity, error) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	keys := t.SecondaryKey[sk]
+func (t *table) getBySecondaryKey(sk string) ([]item.Entity, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	keys := t.secondaryKey[sk]
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("memdb.get by secondary key error on getting entities: secondary key %s not found", sk)
 	}
 
 	entities := make([]item.Entity, 0, len(keys))
 	for _, key := range keys {
-		entity, err := t.Get(key)
-		if err != nil {
+		b, ok := t.data[key]
+		if !ok {
+			return nil, fmt.Errorf("memdb.get by secondary key error on getting entities: inconsistent index for key %q", key)
+		}
+		var entity item.Entity
+		if err := code.Decode(b, &entity); err != nil {
 			return nil, fmt.Errorf("memdb.get by secondary key error on getting entities: %w", err)
 		}
 		entities = append(entities, entity)
 	}
 
+	for _, e := range entities {
+		t.lru.markRecentlyUsed(e.Key)
+	}
+
 	return entities, nil
 }
 
-func (t *Table) Delete(key string) error {
+func (t *table) delete(key string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	b, ok := t.Data[key]
+
+	return t.deleteEntryLocked(key)
+}
+
+func (t *table) deleteEntryLocked(key string) error {
+	b, ok := t.data[key]
 	if !ok {
 		return fmt.Errorf("memdb.delete error on deleting entity: key %s not found", key)
 	}
 
 	var entity item.Entity
-	if err := code.DecodeItem(b, &entity); err != nil {
+	if err := code.Decode(b, &entity); err != nil {
 		return fmt.Errorf("memdb.delete error on decoding entity: %w", err)
 	}
 
-	delete(t.Data, key)
+	delete(t.data, key)
+	t.lru.remove(key)
 
-	if entity.SK != "" {
-		set := t.SecondaryKey[entity.SK]
-		if len(set) == 1 {
-			delete(t.SecondaryKey, entity.SK)
-		} else {
-			t.SecondaryKey[entity.SK] = set.Remove(key)
-		}
-	}
+	t.secondaryKey.remove(key, entity.SK)
 
 	return nil
 }

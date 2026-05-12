@@ -8,14 +8,31 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
+type CBOR struct{}
+
+func NewCBOR() *CBOR {
+	return &CBOR{}
+}
+
+func (c *CBOR) Encode(v any) ([]byte, error) {
+	return cbor.Marshal(v)
+}
+
+func (c *CBOR) Decode(data []byte, item any) error {
+	if err := cbor.Unmarshal(data, item); err != nil {
+		return fmt.Errorf("memdb.decode error on decoding item: %w", err)
+	}
+	return nil
+}
+
 // Encode serializes v to CBOR bytes suitable for storing in memory or on disk.
 func Encode(v any) ([]byte, error) {
 	return cbor.Marshal(v)
 }
 
-// DecodeItem unmarshals CBOR into item (e.g. *item.Entity). Map values in any fields
+// Decode unmarshals CBOR into item (e.g. *item.Entity). Map values in any fields
 // (e.g. Entity.Value) decode as map[interface{}]interface{} — same as cbor.Unmarshal to any.
-func DecodeItem(data []byte, item any) error {
+func Decode(data []byte, item any) error {
 	if err := cbor.Unmarshal(data, item); err != nil {
 		return fmt.Errorf("memdb.decode error on decoding item: %w", err)
 	}

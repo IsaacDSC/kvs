@@ -10,7 +10,7 @@ import (
 
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/item"
-	"github.com/IsaacDSC/kvs/internal/memdb"
+	"github.com/IsaacDSC/kvs/internal/old/memdb"
 )
 
 func TestOpenCreatesLayoutAndReopen(t *testing.T) {

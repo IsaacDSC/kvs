@@ -6,7 +6,7 @@ import "github.com/IsaacDSC/kvs/internal/wal"
 type Op = wal.Op
 
 const (
-	OpPut    = wal.OpPut
+	OpPut    = wal.OpSet
 	OpDel    = wal.OpDel
 	OpBegin  = wal.OpBegin
 	OpCommit = wal.OpCommit
