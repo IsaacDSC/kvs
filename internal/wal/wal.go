@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
+	"github.com/IsaacDSC/kvs/internal/durable"
 	"github.com/IsaacDSC/kvs/internal/item"
 )
 
@@ -30,11 +31,18 @@ type WAL struct {
 }
 
 func New(path string, opts Options, codec Codec) (*WAL, error) {
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	return &WAL{path: path, f: f, opts: opts, codec: codec}, nil
+	w := &WAL{path: path, f: f, opts: opts, codec: codec}
+	if opts.Durability == Buffered {
+		w.bufw = bufio.NewWriter(f)
+	}
+	return w, nil
 }
 
 func (w *WAL) Set(ctx context.Context, tableName string, entity item.Entity) error {
@@ -130,12 +138,62 @@ func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error
 			return fmt.Errorf("WAL.Load.db: unknown wal op %d", e.Op)
 		}
 	}
-	maxSeq, err := w.Replay(apply)
+
+	var lastSeq uint64
+	if w.opts.CheckpointConfigured() {
+		var err error
+		lastSeq, err = durable.LoadLastSeq(w.opts.Checkpoint.Dir)
+		if err != nil {
+			return fmt.Errorf("wal: load checkpoint seq: %w", err)
+		}
+	}
+
+	maxSeq, err := w.replaySince(lastSeq, apply)
 	if err != nil {
 		return fmt.Errorf("db: replay wal: %w", err)
 	}
-	w.seq = maxSeq
+	w.seq = maxUint64(lastSeq, maxSeq)
+
+	// Persist LastSeq after recovery so the next boot skips replayed prefix; fsdb/memdb were
+	// updated during replay for Seq > lastSeq, and Seq <= lastSeq is assumed already on fsdb.
+	if w.opts.CheckpointConfigured() {
+		if err := w.Checkpoint(); err != nil {
+			return fmt.Errorf("wal: post-load checkpoint: %w", err)
+		}
+	}
 	return nil
+}
+
+// Checkpoint persists LastSeq to the configured checkpoint directory after flushing the WAL.
+// Load invokes Checkpoint automatically when checkpoint is configured and replay succeeded.
+// For other callers: ensure durable store (e.g. fsdb) already reflects all mutations through w.seq
+// before calling (typical order: WAL append, fsdb write, then Checkpoint).
+func (w *WAL) Checkpoint() error {
+	if !w.opts.CheckpointConfigured() {
+		return errors.New("wal: checkpoint dir not configured")
+	}
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("wal: checkpoint flush: %w", err)
+	}
+	if err := durable.SaveLastSeq(w.opts.Checkpoint.Dir, w.seq); err != nil {
+		return fmt.Errorf("wal: checkpoint save seq: %w", err)
+	}
+	if w.opts.Checkpoint.TruncateAfterCheckpoint {
+		if err := w.truncate(0); err != nil {
+			return fmt.Errorf("wal: checkpoint truncate: %w", err)
+		}
+		if _, err := w.f.Seek(0, io.SeekEnd); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func maxUint64(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (w *WAL) syncAndHook() error {
@@ -150,6 +208,9 @@ func (w *WAL) syncAndHook() error {
 
 // Open creates (if missing) and opens a WAL file for replay and append.
 func Open(path string, opts Options) (*WAL, error) {
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
@@ -202,6 +263,12 @@ func (w *WAL) Flush() error {
 // Incomplete trailing data is truncated so future appends succeed.
 // Returns the maximum Seq seen in the file.
 func (w *WAL) Replay(apply func(Entry) error) (maxSeq uint64, err error) {
+	return w.replaySince(0, apply)
+}
+
+// replaySince parses the WAL from the start, updates maxSeq for every valid record, and
+// invokes apply only for entries with Seq > skipThroughSeq (checkpoint tail replay).
+func (w *WAL) replaySince(skipThroughSeq uint64, apply func(Entry) error) (maxSeq uint64, err error) {
 	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
 		return 0, err
 	}
@@ -251,8 +318,10 @@ func (w *WAL) Replay(apply func(Entry) error) (maxSeq uint64, err error) {
 		if e.Seq > maxSeq {
 			maxSeq = e.Seq
 		}
-		if err := apply(e); err != nil {
-			return maxSeq, err
+		if e.Seq > skipThroughSeq {
+			if err := apply(e); err != nil {
+				return maxSeq, err
+			}
 		}
 
 		goodOff += int64(len(frame))
