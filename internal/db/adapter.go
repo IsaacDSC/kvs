@@ -123,8 +123,6 @@ func (f *Adapter) Delete(ctx context.Context, tableName string, key string) erro
 	return f.memdb.Del(ctx, tableName, key)
 }
 
-// TODO: ao invés de simplesmente ler todo o WAL e aplicar, devemos ler o WAL e aplicar apenas as operações que não foram aplicadas ainda.
-// Caso apliquemos todas as operações e outro cluster esteja publicando operações GRPC precisamos guarantir a consistência dos dados mesmo assim.
 func (f *Adapter) Load(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

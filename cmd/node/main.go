@@ -27,13 +27,19 @@ import (
 )
 
 const (
-	defaultDir     = "tmp"
-	defaultDataDir = "tmp/data.wal"
+	defaultDir           = "tmp"
+	defaultDataDir       = "tmp/data.wal"
+	defaultCheckpointDir = "tmp/checkpoint"
 )
 
-// go run cmd/node/main.go -id 1 -addrs 127.0.0.1:8080 -peers 127.0.0.1:8081,127.0.0.1:8082
-// go run cmd/node/main.go -id 2 -addrs 127.0.0.1:8081 -peers 127.0.0.1:8080,127.0.0.1:8082
-// go run cmd/node/main.go -id 3 -addrs 127.0.0.1:8082 -peers 127.0.0.1:8080,127.0.0.1:8081
+// Cluster de 3 nós (um terminal por comando; espelha make run1 / run2 / run3):
+//
+//	go run ./cmd/node/main.go -id node1 -grpc-addr :9001 -http-addr :8001 -peers localhost:9002,localhost:9003
+//	go run ./cmd/node/main.go -id node2 -grpc-addr :9002 -http-addr :8002 -peers localhost:9001,localhost:9003
+//	go run ./cmd/node/main.go -id node3 -grpc-addr :9003 -http-addr :8003 -peers localhost:9001,localhost:9002
+//
+// Checkpoint WAL periódico: default 5m; desligar com -checkpoint-interval=0 (ou make … CHECKPOINT_INTERVAL=0).
+// Memdb LRU: default -memdb-max-entries=1000 (0=ilimitado); make run* usa 2000 via Makefile.
 func main() {
 	// id
 	id := flag.String("id", "", "node id")
@@ -43,7 +49,8 @@ func main() {
 	peersRaw := flag.String("peers", "", "node peers")
 	// grpc addr
 	grpcAddr := flag.String("grpc-addr", ":9080", "gRPC listen address for node-to-node RPCs (e.g. :9001)")
-	memdbMaxEntries := flag.Int("memdb-max-entries", 0, "max entries per in-memory table (0=unlimited); LRU eviction applies when set")
+	memdbMaxEntries := flag.Int("memdb-max-entries", 1000, "max entries per in-memory table (0=unlimited); LRU eviction applies when set")
+	checkpointEvery := flag.Duration("checkpoint-interval", 5*time.Minute, "periodic WAL LastSeq checkpoint (0 disables); requires fsdb to stay synchronous with WAL")
 
 	flag.Parse()
 
@@ -82,7 +89,10 @@ func main() {
 
 	codec := code.NewCBOR()
 
-	wal, err := wal.New(defaultDataDir, wal.Options{Durability: wal.SyncEveryWrite}, codec)
+	wal, err := wal.New(defaultDataDir, wal.Options{
+		Durability: wal.SyncEveryWrite,
+		Checkpoint: wal.CheckpointConfig{Dir: defaultCheckpointDir},
+	}, codec)
 	if err != nil {
 		panic(err)
 	}
@@ -94,6 +104,10 @@ func main() {
 	//  Read the WAL and apply the operations to the database
 	if err := db.Load(ctx); err != nil {
 		panic(err)
+	}
+
+	if *checkpointEvery > 0 {
+		go runPeriodicWALCheckpoint(ctx, logger, wal, *checkpointEvery)
 	}
 
 	// Start GRPC Server
@@ -214,4 +228,19 @@ func NewPeers(raw string) (Peers, error) {
 	}
 
 	return out, nil
+}
+
+func runPeriodicWALCheckpoint(ctx context.Context, logger *slog.Logger, w *wal.WAL, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			if err := w.Checkpoint(); err != nil {
+				logger.Error("periodic wal checkpoint failed", "error", err)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
