@@ -8,4 +8,3 @@
         - WAL separado: o batch afeta só o checkpoint / estado em arquivo de dados; o WAL pode continuar uma entrada por operação para durabilidade fina. Recovery = replay WAL (e opcionalmente estado já batched no fs).
         - Latência: um batch “100 ms” adiciona até ~100 ms antes de aparecer no arquivo de dados — mas se leituras quentes vêm da mem, isso pode ser aceitável.
 
-<!-- Worker que le o WAL a partir do ultimo checkpoint salvo em fs e persiste tudo no fs ? -->
