@@ -21,6 +21,7 @@ import (
 	"github.com/IsaacDSC/kvs/internal/raft"
 	"github.com/IsaacDSC/kvs/internal/raftpb"
 	"github.com/IsaacDSC/kvs/internal/store"
+	"github.com/IsaacDSC/kvs/internal/tasks"
 	"github.com/IsaacDSC/kvs/internal/wal"
 	"github.com/IsaacDSC/kvs/pkg/www"
 	"google.golang.org/grpc"
@@ -38,7 +39,8 @@ const (
 //	go run ./cmd/node/main.go -id node2 -grpc-addr :9002 -http-addr :8002 -peers localhost:9001,localhost:9003
 //	go run ./cmd/node/main.go -id node3 -grpc-addr :9003 -http-addr :8003 -peers localhost:9001,localhost:9002
 //
-// Checkpoint WAL periódico: default 5m; desligar com -checkpoint-interval=0 (ou make … CHECKPOINT_INTERVAL=0).
+// Checkpoint WAL (LastSeq) periódico: default 5m; desligar com -checkpoint-interval=0 (ou make … CHECKPOINT_INTERVAL=0).
+// Flush do batcher fsdb é tarefa separada: -fs-flush-interval (relevante com -fs-defer-writes).
 // Memdb LRU: default -memdb-max-entries=1000 (0=ilimitado); make run* usa 2000 via Makefile.
 func main() {
 	// id
@@ -50,7 +52,9 @@ func main() {
 	// grpc addr
 	grpcAddr := flag.String("grpc-addr", ":9080", "gRPC listen address for node-to-node RPCs (e.g. :9001)")
 	memdbMaxEntries := flag.Int("memdb-max-entries", 1000, "max entries per in-memory table (0=unlimited); LRU eviction applies when set")
-	checkpointEvery := flag.Duration("checkpoint-interval", 5*time.Minute, "periodic WAL LastSeq checkpoint (0 disables); requires fsdb to stay synchronous with WAL")
+	checkpointEvery := flag.Duration("checkpoint-interval", 5*time.Minute, "periodic WAL LastSeq metadata checkpoint (0 disables)")
+	fsDeferWrites := flag.Bool("fs-defer-writes", false, "batch coalesced writes to fsdb (LWW); use -fs-flush-interval and/or shutdown flush — see fsdb.WriteBatcher")
+	fsFlushEvery := flag.Duration("fs-flush-interval", time.Minute, "periodic flush of batched fsdb writes when -fs-defer-writes (0 disables); should be ≤ checkpoint-interval if both run")
 
 	flag.Parse()
 
@@ -97,17 +101,28 @@ func main() {
 		panic(err)
 	}
 
-	// Start Database
-	db := db.New(memdb.NewDB(memdb.Options{MaxEntriesPerTable: *memdbMaxEntries}), fsdb.NewDb(store.DefaultDataDir), wal)
-	defer db.Close()
+	// Start Database (filesystem writes go through WriteBatcher: LWW coalesce + optional defer; default is sync flush per op)
+	rawFS := fsdb.NewDb(store.DefaultDataDir)
+	batchOpts := fsdb.WriteBatcherOptions{}
+	if *fsDeferWrites {
+		batchOpts.DeferWrites = true
+	}
+	batchedFS := fsdb.NewWriteBatcher(rawFS, batchOpts)
+	defer batchedFS.Stop()
+
+	database := db.New(memdb.NewDB(memdb.Options{MaxEntriesPerTable: *memdbMaxEntries}), batchedFS, wal)
+	defer database.Close()
 
 	//  Read the WAL and apply the operations to the database
-	if err := db.Load(ctx); err != nil {
+	if err := database.Load(ctx); err != nil {
 		panic(err)
 	}
 
 	if *checkpointEvery > 0 {
-		go runPeriodicWALCheckpoint(ctx, logger, wal, *checkpointEvery)
+		go tasks.RunPeriodicWALCheckpoint(ctx, logger, wal, *checkpointEvery)
+	}
+	if *fsDeferWrites && *fsFlushEvery > 0 {
+		go tasks.RunPeriodicFSFlush(ctx, logger, batchedFS, *fsFlushEvery)
 	}
 
 	// Start GRPC Server
@@ -132,11 +147,11 @@ func main() {
 	mux := http.NewServeMux()
 
 	routes := []www.Handler{
-		api.CreateTableHandler(db, node),
-		api.PutHandler(db, node),
-		api.DeleteHandler(db, node),
-		api.GetHandler(db),
-		api.GetBySecondaryKeyHandler(db),
+		api.CreateTableHandler(database, node),
+		api.PutHandler(database, node),
+		api.DeleteHandler(database, node),
+		api.GetHandler(database),
+		api.GetBySecondaryKeyHandler(database),
 		api.StateHandler(node),
 	}
 
@@ -166,17 +181,17 @@ func main() {
 				if node.State().Role == raft.Follower.String() {
 					switch entry.Data.Cmd {
 					case commands.CreateTableCmd:
-						if err := db.CreateTable(entry.Data.TableName); err != nil {
+						if err := database.CreateTable(entry.Data.TableName); err != nil {
 							logger.Error("failed to create table", "error", err)
 							os.Exit(1)
 						}
 					case commands.SetCmd:
-						if err := db.Set(ctx, entry.Data.TableName, entry.Data.Item); err != nil {
+						if err := database.Set(ctx, entry.Data.TableName, entry.Data.Item); err != nil {
 							logger.Error("failed to set item", "error", err)
 							os.Exit(1)
 						}
 					case commands.DeleteCmd:
-						if err := db.Delete(ctx, entry.Data.TableName, entry.Data.Item.Key); err != nil {
+						if err := database.Delete(ctx, entry.Data.TableName, entry.Data.Item.Key); err != nil {
 							logger.Error("failed to delete item", "error", err)
 							os.Exit(1)
 						}
@@ -228,19 +243,4 @@ func NewPeers(raw string) (Peers, error) {
 	}
 
 	return out, nil
-}
-
-func runPeriodicWALCheckpoint(ctx context.Context, logger *slog.Logger, w *wal.WAL, every time.Duration) {
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-t.C:
-			if err := w.Checkpoint(); err != nil {
-				logger.Error("periodic wal checkpoint failed", "error", err)
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
 }
