@@ -1,5 +1,5 @@
-// Package cfg loads node runtime tuning from a dotenv file and/or the process
-// environment using [github.com/ilyakaznacheev/cleanenv].
+// Package cfg loads node CLI flags ([ParseNodeFlags]) and runtime tuning from the
+// process environment using [github.com/ilyakaznacheev/cleanenv].
 package cfg
 
 import (
@@ -19,8 +19,7 @@ type Config struct {
 
 var c Config
 
-// Load reads defaultEnvFile from the working directory when present; otherwise
-// only environment variables and env-default tags apply.
+// Load reads process environment variables (and env-default tags on [Config]).
 func Load() error {
 	if err := cleanenv.ReadEnv(&c); err != nil {
 		return fmt.Errorf("cfg: read environment: %w", err)
@@ -31,4 +30,14 @@ func Load() error {
 
 func Get() Config {
 	return c
+}
+
+// LoadFromFile reads tuning fields from a dotenv, YAML, or TOML file (by extension).
+// It is intended for tests and tooling; the node binary uses [Load] with the environment.
+func LoadFromFile(path string) (Config, error) {
+	var out Config
+	if err := cleanenv.ReadConfig(path, &out); err != nil {
+		return Config{}, fmt.Errorf("cfg: read config file %q: %w", path, err)
+	}
+	return out, nil
 }
