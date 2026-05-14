@@ -1,7 +1,7 @@
 {
   "version": 1,
   "hooks": {
-    "afterFileEdit": [{
+    "stop": [{
       "command": "git checkout -b feature/AI-$(date +%s)"
     }]
   }

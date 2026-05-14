@@ -98,45 +98,42 @@ func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error
 		return item.Entity{Key: e.Key, SK: e.Fk, Value: v}, nil
 	}
 
-	apply := func(e Entry) error {
-		for _, ops := range operations {
-			if err := ops.CreateTable(e.Table); err != nil {
-				return fmt.Errorf("WAL.Load.db: ensure table %q: %w", e.Table, err)
-			}
+	applyEntry := func(ops commands.Operations, e Entry) error {
+		if err := ops.CreateTable(e.Table); err != nil {
+			return fmt.Errorf("WAL.Load.db: ensure table %q: %w", e.Table, err)
 		}
-
 		switch e.Op {
 		case OpSet:
 			it, err := decodeEntity(e)
 			if err != nil {
 				return fmt.Errorf("WAL.Load.db: decode wal put: %w", err)
 			}
-
-			for _, ops := range operations {
-				if err := ops.Set(ctx, e.Table, it); err != nil {
-					return fmt.Errorf("WAL.Load.db: set: %w", err)
-				}
+			if err := ops.Set(ctx, e.Table, it); err != nil {
+				return fmt.Errorf("WAL.Load.db: set: %w", err)
 			}
-
 			return nil
-
 		case OpDel:
-			for _, ops := range operations {
-				if err := ops.Del(ctx, e.Table, e.Key); err != nil {
-					return fmt.Errorf("WAL.Load.db: del: %w", err)
-				}
+			if err := ops.Del(ctx, e.Table, e.Key); err != nil {
+				return fmt.Errorf("WAL.Load.db: del: %w", err)
 			}
-
 			return nil
-
 		case OpBegin, OpCommit:
 			// Transactions are supported by WAL format, but Facade doesn't use them yet.
 			// For now, ignore them (a tx would be appended by a different component).
 			return nil
-
 		default:
 			return fmt.Errorf("WAL.Load.db: unknown wal op %d", e.Op)
 		}
+	}
+
+	// applyAll func aply in list operations received (fsdb and memdb)
+	applyAll := func(targets []commands.Operations, e Entry) error {
+		for _, ops := range targets {
+			if err := applyEntry(ops, e); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	var lastSeq uint64
@@ -148,14 +145,41 @@ func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error
 		}
 	}
 
-	maxSeq, err := w.replaySince(lastSeq, apply)
+	var maxSeq uint64
+	var err error
+	switch len(operations) {
+	case 1:
+		maxSeq, err = w.replaySince(lastSeq, func(e Entry) error {
+			return applyAll(operations, e)
+		})
+	default:
+		// Volatile stores (e.g. memdb) start empty: they need the full WAL. The durable tail
+		// (typically fsdb) only replays Seq > lastSeq — prefix is assumed on disk.
+		prefix := operations[:len(operations)-1]
+		tail := operations[len(operations)-1]
+		maxSeq, err = w.replaySince(0, func(e Entry) error {
+			return applyAll(prefix, e)
+		})
+		if err != nil {
+			return fmt.Errorf("db: replay wal (full): %w", err)
+		}
+		maxTail, errTail := w.replaySince(lastSeq, func(e Entry) error {
+			return applyEntry(tail, e)
+		})
+		if errTail != nil {
+			return fmt.Errorf("db: replay wal (tail): %w", errTail)
+		}
+		if maxTail > maxSeq {
+			maxSeq = maxTail
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("db: replay wal: %w", err)
 	}
 	w.seq = maxUint64(lastSeq, maxSeq)
 
-	// Persist LastSeq after recovery so the next boot skips replayed prefix; fsdb/memdb were
-	// updated during replay for Seq > lastSeq, and Seq <= lastSeq is assumed already on fsdb.
+	// Persist LastSeq after recovery so the next boot skips replayed prefix; the tail store
+	// was updated for Seq > lastSeq, and Seq <= lastSeq is assumed already materialized there.
 	if w.opts.CheckpointConfigured() {
 		if err := w.Checkpoint(); err != nil {
 			return fmt.Errorf("wal: post-load checkpoint: %w", err)
@@ -166,14 +190,20 @@ func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error
 
 // Checkpoint persists LastSeq to the configured checkpoint directory after flushing the WAL.
 // Load invokes Checkpoint automatically when checkpoint is configured and replay succeeded.
-// For other callers: ensure durable store (e.g. fsdb) already reflects all mutations through w.seq
-// before calling (typical order: WAL append, fsdb write, then Checkpoint).
+// When Options.BeforeCheckpoint is set (e.g. flush a deferred fsdb batcher), it runs after WAL
+// flush and before SaveLastSeq. For other callers: ensure durable store already reflects all
+// mutations through w.seq before calling when BeforeCheckpoint is nil.
 func (w *WAL) Checkpoint() error {
 	if !w.opts.CheckpointConfigured() {
 		return errors.New("wal: checkpoint dir not configured")
 	}
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("wal: checkpoint flush: %w", err)
+	}
+	if w.opts.BeforeCheckpoint != nil {
+		if err := w.opts.BeforeCheckpoint(context.Background()); err != nil {
+			return fmt.Errorf("wal: before checkpoint: %w", err)
+		}
 	}
 	if err := durable.SaveLastSeq(w.opts.Checkpoint.Dir, w.seq); err != nil {
 		return fmt.Errorf("wal: checkpoint save seq: %w", err)

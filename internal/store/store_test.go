@@ -2,16 +2,26 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"testing"
 
+	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/item"
 	"github.com/IsaacDSC/kvs/internal/old/memdb"
 )
+
+func TestMain(m *testing.M) {
+	if err := cfg.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "cfg.Load: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
 
 func TestOpenCreatesLayoutAndReopen(t *testing.T) {
 	dir := t.TempDir()
