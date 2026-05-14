@@ -64,7 +64,6 @@ func (f *Adapter) Set(ctx context.Context, tableName string, entity item.Entity)
 		return fmt.Errorf("db: wal set: %w", err)
 	}
 
-	// TODO: passar para ser async
 	if err := f.fsdb.Set(ctx, tableName, entity); err != nil {
 		return fmt.Errorf("db: put entity: %w", err)
 	}
@@ -115,7 +114,6 @@ func (f *Adapter) Delete(ctx context.Context, tableName string, key string) erro
 		return fmt.Errorf("db: wal delete: %w", err)
 	}
 
-	// TODO: passar para ser async
 	if err := f.fsdb.Del(ctx, tableName, key); err != nil {
 		return fmt.Errorf("db: delete entity: %w", err)
 	}
@@ -139,6 +137,11 @@ func (f *Adapter) Close() error {
 	defer f.mu.Unlock()
 	if f.logdb == nil {
 		return nil
+	}
+	if flusher, ok := f.fsdb.(interface {
+		Flush(ctx context.Context) error
+	}); ok {
+		_ = flusher.Flush(context.Background())
 	}
 	return f.logdb.Close()
 }
