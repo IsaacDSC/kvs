@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/IsaacDSC/kvs/internal/api"
+	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/commands"
 	"github.com/IsaacDSC/kvs/internal/db"
@@ -39,9 +40,9 @@ const (
 //	go run ./cmd/node/main.go -id node2 -grpc-addr :9002 -http-addr :8002 -peers localhost:9001,localhost:9003
 //	go run ./cmd/node/main.go -id node3 -grpc-addr :9003 -http-addr :8003 -peers localhost:9001,localhost:9002
 //
-// Checkpoint WAL (LastSeq) periódico: default 5m; desligar com -checkpoint-interval=0 (ou make … CHECKPOINT_INTERVAL=0).
-// Flush do batcher fsdb é tarefa separada: -fs-flush-interval (relevante com -fs-defer-writes).
-// Memdb LRU: default -memdb-max-entries=1000 (0=ilimitado); make run* usa 2000 via Makefile.
+// Checkpoint WAL (LastSeq) periódico: ver CHECKPOINT_INTERVAL em .env / env (default 5m; 0 desliga).
+// Flush do batcher fsdb: FS_FLUSH_INTERVAL (relevante com FS_DEFER_WRITES=true).
+// Memdb LRU: MEMDB_MAX_ENTRIES (default 1000; 0=ilimitado) — ver internal/cfg e .envrc.
 func main() {
 	// id
 	id := flag.String("id", "", "node id")
@@ -51,12 +52,14 @@ func main() {
 	peersRaw := flag.String("peers", "", "node peers")
 	// grpc addr
 	grpcAddr := flag.String("grpc-addr", ":9080", "gRPC listen address for node-to-node RPCs (e.g. :9001)")
-	memdbMaxEntries := flag.Int("memdb-max-entries", 1000, "max entries per in-memory table (0=unlimited); LRU eviction applies when set")
-	checkpointEvery := flag.Duration("checkpoint-interval", 5*time.Minute, "periodic WAL LastSeq metadata checkpoint (0 disables)")
-	fsDeferWrites := flag.Bool("fs-defer-writes", false, "batch coalesced writes to fsdb (LWW); use -fs-flush-interval and/or shutdown flush — see fsdb.WriteBatcher")
-	fsFlushEvery := flag.Duration("fs-flush-interval", time.Minute, "periodic flush of batched fsdb writes when -fs-defer-writes (0 disables); should be ≤ checkpoint-interval if both run")
 
 	flag.Parse()
+
+	if err := cfg.Load(); err != nil {
+		panic(err)
+	}
+
+	nodeCfg := cfg.Get()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -104,13 +107,13 @@ func main() {
 	// Start Database (filesystem writes go through WriteBatcher: LWW coalesce + optional defer; default is sync flush per op)
 	rawFS := fsdb.NewDb(store.DefaultDataDir)
 	batchOpts := fsdb.WriteBatcherOptions{}
-	if *fsDeferWrites {
+	if nodeCfg.FSDeferWrites {
 		batchOpts.DeferWrites = true
 	}
 	batchedFS := fsdb.NewWriteBatcher(rawFS, batchOpts)
 	defer batchedFS.Stop()
 
-	database := db.New(memdb.NewDB(memdb.Options{MaxEntriesPerTable: *memdbMaxEntries}), batchedFS, wal)
+	database := db.New(memdb.NewDB(memdb.Options{MaxEntriesPerTable: nodeCfg.MemDBMaxEntries}), batchedFS, wal)
 	defer database.Close()
 
 	//  Read the WAL and apply the operations to the database
@@ -118,11 +121,11 @@ func main() {
 		panic(err)
 	}
 
-	if *checkpointEvery > 0 {
-		go tasks.RunPeriodicWALCheckpoint(ctx, logger, wal, *checkpointEvery)
+	if nodeCfg.CheckpointInterval > 0 {
+		go tasks.RunPeriodicWALCheckpoint(ctx, logger, wal, nodeCfg.CheckpointInterval)
 	}
-	if *fsDeferWrites && *fsFlushEvery > 0 {
-		go tasks.RunPeriodicFSFlush(ctx, logger, batchedFS, *fsFlushEvery)
+	if nodeCfg.FSDeferWrites && nodeCfg.FSFlushInterval > 0 {
+		go tasks.RunPeriodicFSFlush(ctx, logger, batchedFS, nodeCfg.FSFlushInterval)
 	}
 
 	// Start GRPC Server

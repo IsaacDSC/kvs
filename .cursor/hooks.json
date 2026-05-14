@@ -1,15 +1,8 @@
 {
-    "version": 1,
-    "hooks": {
-      "afterFileEdit": [
-        {
-          "command": "but cursor after-edit"
-        }
-      ],
-      "stop": [
-        {
-          "command": "but cursor stop"
-        }
-      ]
-    }
+  "version": 1,
+  "hooks": {
+    "afterFileEdit": [{
+      "command": "git checkout -b feature/AI-$(date +%s)"
+    }]
   }
+}
