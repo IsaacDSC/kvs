@@ -108,6 +108,21 @@ func (b *WriteBatcher) loopPeriodicFlush() {
 	}
 }
 
+// DirtyFlushThresholds returns the configured MaxDirtyKeys and MaxDirtyBytes
+// (after normalization in [NewWriteBatcher]). Used by periodic flush tasks to
+// align time- and size-driven triggers with the batcher.
+func (b *WriteBatcher) DirtyFlushThresholds() (maxKeys int, maxBytes int64) {
+	return b.opts.MaxDirtyKeys, b.opts.MaxDirtyBytes
+}
+
+// PendingDirty returns the number of distinct merge keys and the estimated
+// byte size of the coalescing buffer. It acquires the batcher mutex briefly.
+func (b *WriteBatcher) PendingDirty() (keys int, bytes int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.pend), b.bytesN
+}
+
 // Stop ends the periodic flusher goroutine, if any, and waits for it to exit.
 func (b *WriteBatcher) Stop() {
 	b.mu.Lock()

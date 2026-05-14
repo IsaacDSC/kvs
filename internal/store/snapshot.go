@@ -5,8 +5,6 @@ import (
 	"github.com/IsaacDSC/kvs/internal/old/memdb"
 )
 
-const CheckpointFileName = durable.CheckpointFileName
-
 func loadCheckpoint(dir string, database *memdb.DB) (lastSeq uint64, err error) {
 	return durable.LoadCheckpoint(dir, database)
 }

@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -35,6 +36,9 @@ type Options struct {
 	// AfterSync is invoked after each successful WAL fsync (SyncEveryWrite or Flush). Optional, for tests.
 	AfterSync  func()
 	Checkpoint CheckpointConfig
+	// BeforeCheckpoint runs after replay and before SaveLastSeq when checkpoint is configured.
+	// Use to flush deferred stores (e.g. fsdb WriteBatcher) so on-disk state matches w.seq.
+	BeforeCheckpoint func(context.Context) error
 }
 
 // CheckpointConfigured reports whether checkpoint metadata (LastSeq) is loaded and saved.

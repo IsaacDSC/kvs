@@ -5,13 +5,16 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/fxamacker/cbor/v2"
 )
 
 // LoadLastSeq reads checkpoint.cbor in dir and returns the stored LastSeq without
 // loading table snapshots. Missing file returns (0, nil).
 func LoadLastSeq(dir string) (uint64, error) {
-	path := filepath.Join(dir, CheckpointFileName)
+	conf := cfg.Get()
+
+	path := filepath.Join(dir, conf.CheckpointFileName)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -32,6 +35,8 @@ func LoadLastSeq(dir string) (uint64, error) {
 // SaveLastSeq writes only version and LastSeq (no table snapshot) atomically.
 // Use after durable state on disk (e.g. fsdb) reflects all mutations through seq.
 func SaveLastSeq(dir string, seq uint64) error {
+	conf := cfg.Get()
+
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("durable: mkdir checkpoint dir: %w", err)
 	}
@@ -44,7 +49,7 @@ func SaveLastSeq(dir string, seq uint64) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, CheckpointFileName)
+	path := filepath.Join(dir, conf.CheckpointFileName)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err

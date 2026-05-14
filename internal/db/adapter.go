@@ -125,7 +125,7 @@ func (f *Adapter) Load(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if err := f.logdb.Load(ctx, f.fsdb, f.memdb); err != nil {
+	if err := f.logdb.Load(ctx, f.memdb, f.fsdb); err != nil {
 		return fmt.Errorf("db: load wal: %w", err)
 	}
 

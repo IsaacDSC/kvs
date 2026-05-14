@@ -5,11 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/IsaacDSC/kvs/internal/old/memdb"
 	"github.com/fxamacker/cbor/v2"
 )
-
-const CheckpointFileName = "checkpoint.cbor"
 
 type checkpointFile struct {
 	Version int                  `cbor:"v"`
@@ -24,7 +23,8 @@ type tableSnap struct {
 
 // LoadCheckpoint restores DB state from checkpoint.cbor, returning the stored last sequence.
 func LoadCheckpoint(dir string, database *memdb.DB) (lastSeq uint64, err error) {
-	path := filepath.Join(dir, CheckpointFileName)
+	conf := cfg.Get()
+	path := filepath.Join(dir, conf.CheckpointFileName)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -49,6 +49,8 @@ func LoadCheckpoint(dir string, database *memdb.DB) (lastSeq uint64, err error) 
 
 // SaveCheckpoint writes the current DB state and last sequence atomically.
 func SaveCheckpoint(dir string, database *memdb.DB, lastSeq uint64) error {
+	conf := cfg.Get()
+
 	cf := checkpointFile{
 		Version: 1,
 		LastSeq: lastSeq,
@@ -65,7 +67,7 @@ func SaveCheckpoint(dir string, database *memdb.DB, lastSeq uint64) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, CheckpointFileName)
+	path := filepath.Join(dir, conf.CheckpointFileName)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err

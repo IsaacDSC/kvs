@@ -2,15 +2,25 @@ package wal
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/durable"
 	"github.com/IsaacDSC/kvs/internal/item"
 	"github.com/IsaacDSC/kvs/internal/memdb"
 )
+
+func TestMain(m *testing.M) {
+	if err := cfg.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "cfg.Load: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
 
 func TestLoad_replaysOnlyAfterCheckpointSeq(t *testing.T) {
 	ctx := context.Background()
@@ -65,6 +75,61 @@ func TestLoad_replaysOnlyAfterCheckpointSeq(t *testing.T) {
 	}
 	if w2.seq != 3 {
 		t.Fatalf("w.seq after load: got %d want 3", w2.seq)
+	}
+}
+
+// Two backends: prefix targets get a full replay; the last target gets tail-only replay (checkpoint).
+func TestLoad_twoBackends_fullThenTail(t *testing.T) {
+	ctx := context.Background()
+	codec := code.NewCBOR()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+	ckptDir := filepath.Join(dir, "ckpt")
+
+	opts := Options{Durability: SyncEveryWrite, Checkpoint: CheckpointConfig{Dir: ckptDir}}
+	w, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tab := "t"
+	for _, k := range []string{"k1", "k2", "k3"} {
+		if err := w.Set(ctx, tab, item.Entity{Key: k, Value: k}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := durable.SaveLastSeq(ckptDir, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	w2, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+
+	memFull := memdb.NewDB(memdb.Options{})
+	memTail := memdb.NewDB(memdb.Options{})
+	if err := w2.Load(ctx, memFull, memTail); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, k := range []string{"k1", "k2", "k3"} {
+		if _, err := memFull.Get(ctx, tab, k); err != nil {
+			t.Fatalf("memFull missing %s: %v", k, err)
+		}
+	}
+	for _, k := range []string{"k1", "k2"} {
+		if _, err := memTail.Get(ctx, tab, k); err == nil {
+			t.Fatalf("memTail should not have %s after tail-only replay", k)
+		}
+	}
+	if _, err := memTail.Get(ctx, tab, "k3"); err != nil {
+		t.Fatalf("memTail missing k3: %v", err)
 	}
 }
 

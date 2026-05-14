@@ -40,7 +40,7 @@ const (
 //	go run ./cmd/node/main.go -id node3 -grpc-addr :9003 -http-addr :8003 -peers localhost:9001,localhost:9002
 //
 // Checkpoint WAL (LastSeq) periódico: ver CHECKPOINT_INTERVAL em .env / env (default 5m; 0 desliga).
-// Flush do batcher fsdb: FS_FLUSH_INTERVAL (relevante com FS_DEFER_WRITES=true).
+// Flush do batcher fsdb: FS_FLUSH_INTERVAL; FS_PERIODIC_POLL_INTERVAL (gatilho por tamanho, min 100ms); FS_FLUSH_OP_TIMEOUT (min 1s).
 // Memdb LRU: MEMDB_MAX_ENTRIES (default 1000; 0=ilimitado) — ver internal/cfg e .envrc.
 func main() {
 	nodeFlags, err := cfg.ParseNodeFlags(flag.CommandLine, os.Args[1:])
@@ -79,15 +79,8 @@ func main() {
 
 	codec := code.NewCBOR()
 
-	wal, err := wal.New(defaultDataDir, wal.Options{
-		Durability: wal.SyncEveryWrite,
-		Checkpoint: wal.CheckpointConfig{Dir: defaultCheckpointDir},
-	}, codec)
-	if err != nil {
-		panic(err)
-	}
-
-	// Start Database (filesystem writes go through WriteBatcher: LWW coalesce + optional defer; default is sync flush per op)
+	// Filesystem writes go through WriteBatcher before WAL construction so Load can flush
+	// deferred state before post-recovery Checkpoint (LastSeq must not advance ahead of disk).
 	rawFS := fsdb.NewDb(store.DefaultDataDir)
 	batchOpts := fsdb.WriteBatcherOptions{}
 	if nodeCfg.FSDeferWrites {
@@ -95,6 +88,17 @@ func main() {
 	}
 	batchedFS := fsdb.NewWriteBatcher(rawFS, batchOpts)
 	defer batchedFS.Stop()
+
+	wal, err := wal.New(defaultDataDir, wal.Options{
+		Durability: wal.SyncEveryWrite,
+		Checkpoint: wal.CheckpointConfig{Dir: defaultCheckpointDir},
+		BeforeCheckpoint: func(ckptCtx context.Context) error {
+			return batchedFS.Flush(ckptCtx)
+		},
+	}, codec)
+	if err != nil {
+		panic(err)
+	}
 
 	database := db.New(memdb.NewDB(memdb.Options{MaxEntriesPerTable: nodeCfg.MemDBMaxEntries}), batchedFS, wal)
 	defer database.Close()
@@ -108,7 +112,14 @@ func main() {
 		go tasks.RunPeriodicWALCheckpoint(ctx, logger, wal, nodeCfg.CheckpointInterval)
 	}
 	if nodeCfg.FSDeferWrites && nodeCfg.FSFlushInterval > 0 {
-		go tasks.RunPeriodicFSFlush(ctx, logger, batchedFS, nodeCfg.FSFlushInterval)
+		maxKeys, maxBytes := batchedFS.DirtyFlushThresholds()
+		go tasks.RunPeriodicFSFlush(ctx, logger, batchedFS, tasks.FSPeriodicFlushLimits{
+			Interval:         nodeCfg.FSFlushInterval,
+			MaxPendingKeys:   maxKeys,
+			MaxPendingBytes:  maxBytes,
+			PendingPollEvery: nodeCfg.FSPeriodicPoll,
+			PerFlushTimeout:  nodeCfg.FSFlushOpTimeout,
+		}, batchedFS)
 	}
 
 	// Start GRPC Server
