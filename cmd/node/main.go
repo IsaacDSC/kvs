@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -44,16 +43,11 @@ const (
 // Flush do batcher fsdb: FS_FLUSH_INTERVAL (relevante com FS_DEFER_WRITES=true).
 // Memdb LRU: MEMDB_MAX_ENTRIES (default 1000; 0=ilimitado) — ver internal/cfg e .envrc.
 func main() {
-	// id
-	id := flag.String("id", "", "node id")
-	// httpAddr
-	httpAddr := flag.String("http-addr", "", "node addrs")
-	// peers
-	peersRaw := flag.String("peers", "", "node peers")
-	// grpc addr
-	grpcAddr := flag.String("grpc-addr", ":9080", "gRPC listen address for node-to-node RPCs (e.g. :9001)")
-
-	flag.Parse()
+	nodeFlags, err := cfg.ParseNodeFlags(flag.CommandLine, os.Args[1:])
+	if err != nil {
+		slog.Error("invalid flags", "error", err)
+		os.Exit(1)
+	}
 
 	if err := cfg.Load(); err != nil {
 		panic(err)
@@ -63,28 +57,17 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})).With("node", *id)
+	})).With("node", nodeFlags.ID)
 
-	logger.Info("starting node", "id", *id, "addrs", *httpAddr, "peers", *peersRaw)
-
-	if *id == "" {
-		slog.Error("flag -id is required")
-		os.Exit(1)
-	}
-
-	peers, err := NewPeers(*peersRaw)
-	if err != nil {
-		logger.Error("failed to parse peers", "error", err)
-		os.Exit(1)
-	}
+	logger.Info("starting node", "id", nodeFlags.ID, "addrs", nodeFlags.HTTPAddr, "peers", nodeFlags.Peers)
 
 	clusterMode := "multi-node"
-	if len(peers) == 0 {
+	if len(nodeFlags.Peers) == 0 {
 		clusterMode = "single-node"
 	}
 
 	transport := raft.NewTransport()
-	node := raft.NewNode(*id, peers, transport, logger)
+	node := raft.NewNode(nodeFlags.ID, nodeFlags.Peers, transport, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -132,14 +115,14 @@ func main() {
 	grpcSrv := grpc.NewServer()
 	grpcSrv.RegisterService(&raftpb.ServiceDesc, raft.NewGRPCServer(node))
 
-	grpcLis, err := net.Listen("tcp", *grpcAddr)
+	grpcLis, err := net.Listen("tcp", nodeFlags.GRPCAddr)
 	if err != nil {
-		logger.Error("gRPC listen failed", "addr", *grpcAddr, "err", err)
+		logger.Error("gRPC listen failed", "addr", nodeFlags.GRPCAddr, "err", err)
 		os.Exit(1)
 	}
 
 	go func() {
-		logger.Info("gRPC listening", "addr", *grpcAddr)
+		logger.Info("gRPC listening", "addr", nodeFlags.GRPCAddr)
 		if err := grpcSrv.Serve(grpcLis); err != nil {
 			logger.Error("gRPC server error", "err", err)
 			stop()
@@ -162,10 +145,10 @@ func main() {
 		mux.HandleFunc(r.Pattern, r.Fn)
 	}
 
-	httpSrv := &http.Server{Addr: *httpAddr, Handler: mux}
+	httpSrv := &http.Server{Addr: nodeFlags.HTTPAddr, Handler: mux}
 
 	go func() {
-		logger.Info("HTTP listening", "addr", *httpAddr, "peers", peers, "cluster-mode", clusterMode)
+		logger.Info("HTTP listening", "addr", nodeFlags.HTTPAddr, "peers", nodeFlags.Peers, "cluster-mode", clusterMode)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("HTTP server error", "err", err)
 			stop()
@@ -232,18 +215,4 @@ func main() {
 	}
 
 	transport.Close()
-}
-
-type Peers []string
-
-func NewPeers(raw string) (Peers, error) {
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-
-	return out, nil
 }
