@@ -1,1 +1,14 @@
-Estrutura de dados
+Optimistic Delete
+Optimistic Put
+
+Docker with 3 nodes and share volume data.wal
+
+ACID - Session-Transaction/Commit/Rollback
+
+SDK
+
+Charge Tests
+
+Wrapper para responses padronizado utilizando Content-Type: application-json
+
+Configurar Quorum para ao replicar a escrita esperar confirmar(0 não esperando, 1 esperando um ok, 2,3,4... esperando 2,3,4 ok) 

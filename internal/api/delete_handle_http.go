@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
-	"github.com/IsaacDSC/kvs/internal/item"
+	"github.com/IsaacDSC/kvs/internal/dto"
 	"github.com/IsaacDSC/kvs/pkg/www"
 )
 
@@ -36,7 +36,7 @@ func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 			if err := replicateNodes.ProposeCommand(commands.Data{
 				Cmd:       commands.DeleteCmd,
 				TableName: params.TableName,
-				Item: item.Entity{
+				Item: dto.Item{
 					Key: params.Key,
 				},
 			}); err != nil {

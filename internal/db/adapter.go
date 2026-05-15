@@ -2,10 +2,12 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
+	"github.com/IsaacDSC/kvs/internal/dto"
 	"github.com/IsaacDSC/kvs/internal/item"
 )
 
@@ -56,9 +58,37 @@ func (f *Adapter) CreateTable(table string) error {
 	return nil
 }
 
-func (f *Adapter) Set(ctx context.Context, tableName string, entity item.Entity) error {
+var ErrNotCompatibleVersion = errors.New("error not compatible version")
+
+// getEntityMemThenFS reads from memdb and falls back to fsdb on error. Caller must hold f.mu.
+func (f *Adapter) getEntityMemThenFS(ctx context.Context, tableName, key string) (item.Entity, error) {
+	it, err := f.memdb.Get(ctx, tableName, key)
+	if err != nil {
+		return f.fsdb.Get(ctx, tableName, key)
+	}
+	return it, nil
+}
+
+type Opts string
+
+func (f *Adapter) Set(ctx context.Context, tableName string, it dto.Item) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	entity := it.Entity()
+
+	if it.Version != nil {
+		itdb, err := f.getEntityMemThenFS(ctx, tableName, entity.Key)
+		if err != nil && !errors.Is(ErrNotFound, err) {
+			return fmt.Errorf("error on optimistic set :%w", err)
+		}
+
+		// validate if db version is equal old version received
+		if itdb.Version != it.Version.OldVersion {
+			return ErrNotCompatibleVersion
+		}
+
+	}
 
 	if err := f.logdb.Set(ctx, tableName, entity); err != nil {
 		return fmt.Errorf("db: wal set: %w", err)
@@ -80,14 +110,10 @@ func (f *Adapter) Get(ctx context.Context, tableName string, key string) (item.E
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	it, err := f.memdb.Get(ctx, tableName, key)
+	it, err := f.getEntityMemThenFS(ctx, tableName, key)
 	if err != nil {
-		it, err = f.fsdb.Get(ctx, tableName, key)
-		if err != nil {
-			return item.Entity{}, err
-		}
+		return item.Entity{}, err
 	}
-
 	return it, nil
 }
 
