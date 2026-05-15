@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
@@ -10,17 +11,17 @@ import (
 )
 
 type DeleteDb interface {
-	Delete(ctx context.Context, tableName string, key string) error
+	Delete(ctx context.Context, tableName string, it dto.DeleteItem) error
 }
 
 type deleteParams struct {
-	TableName string `param:"tableName"`
-	Key       string `param:"key"`
+	TableName     string            `param:"tableName"`
+	OperationType dto.OperationType `query:"operation"`
 }
 
 func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 	return www.Handler{
-		Pattern: "DELETE /table/{tableName}/{key}",
+		Pattern: "DELETE /table/{tableName}",
 		Fn: func(w http.ResponseWriter, r *http.Request) {
 			var params deleteParams
 			if err := www.DecodeParams(r, &params); err != nil {
@@ -28,19 +29,36 @@ func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 				return
 			}
 
-			if err := db.Delete(r.Context(), params.TableName, params.Key); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+			var it dto.DeleteItem
+			if err := json.NewDecoder(r.Body).Decode(&it); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			if err := it.Validate(params.OperationType); err != nil {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(err.Json())
+			}
+
+			cmd := commands.DeleteCmd
+			if params.OperationType == dto.OperationTypeOptimisticLock {
+				cmd = commands.OptimisticDelCmd
+			}
+
+			err := db.Delete(r.Context(), params.TableName, it)
+			if err != nil {
+				statusCode := getStatusCode(err)
+				http.Error(w, err.Error(), statusCode)
 				return
 			}
 
 			if err := replicateNodes.ProposeCommand(commands.Data{
-				Cmd:       commands.DeleteCmd,
+				Cmd:       cmd,
 				TableName: params.TableName,
-				Item: dto.Item{
-					Key: params.Key,
-				},
+				Item:      it.Item(),
 			}); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				statusCode := getStatusCode(err)
+				http.Error(w, err.Error(), statusCode)
 				return
 			}
 

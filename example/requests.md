@@ -14,14 +14,14 @@ curl -s -X POST "http://localhost:8001/table" \
 ```sh
 curl -s -X PUT "http://localhost:8001/table/test_tb" \
   -H "Content-Type: application/json" \
--d '{"key": "4321id", "sk": "familia", "value":{"key2": "value2"}}'
+-d '{"key": "fordel", "sk": "familia", "value":{"fordel": "fordelvalue"}}'
 ```
 
 Create using optimisticLock
 ```sh
 curl -s -X PUT "http://localhost:8001/table/test_tb?operation=optimistic_lock" \
     -H "Content-Type: application/json" \
-    -d '{"key": "4321id", "sk": "familia", "value":{"key2": "value2"}, "version": {"old_version": "", "propose_version":"1"}}'
+    -d '{"key": "fordel", "sk": "familia", "value":{"keyaa": "valueaa"}, "version": {"old_version": "", "propose_version":"1"}}'
 ```
 
 ### Get by key 
@@ -40,6 +40,16 @@ curl -X GET "http://localhost:8001/table/test_tb?sk=familia" | jq
 ### Delete by key
 
 ```sh
-curl -i -X DELETE "http://localhost:8001/table/test_tb/4321id" 
+curl -i -X DELETE "http://localhost:8001/table/test_tb" \
+    -H "Content-Type: application/json" \
+    -d '{"key": "fordel"}'
+
+```
+Delete using optimisticLock
+
+```sh
+curl -i -X DELETE "http://localhost:8001/table/test_tb?operation=optimistic_lock" \
+  -H "Content-Type: application/json" \
+  -d '{"key": "fordel", "version": {"old_version": "2"}}'
 
 ```

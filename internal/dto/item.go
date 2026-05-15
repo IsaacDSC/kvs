@@ -31,6 +31,13 @@ func (i Item) Entity() item.Entity {
 	return ent
 }
 
+func (i Item) DelItem() DeleteItem {
+	return DeleteItem{
+		Key:     i.Key,
+		Version: i.Version,
+	}
+}
+
 func (i Item) Validate() *FieldError {
 	output := NewFieldError()
 	if i.Version != nil {

@@ -3,6 +3,7 @@ package cfg_test
 import (
 	"errors"
 	"flag"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -38,6 +39,10 @@ func TestParseNodeFlags(t *testing.T) {
 		if !slices.Equal(got.Peers, wantPeers) {
 			t.Fatalf("Peers: got %q want %q", got.Peers, wantPeers)
 		}
+		wantFS := filepath.Join("tmp", "node1")
+		if got.FsDefaultDir != wantFS {
+			t.Fatalf("FsDefaultDir: got %q want %q", got.FsDefaultDir, wantFS)
+		}
 	})
 	t.Run("default grpc addr", func(t *testing.T) {
 		t.Parallel()
@@ -48,6 +53,29 @@ func TestParseNodeFlags(t *testing.T) {
 		}
 		if got.GRPCAddr != ":9080" {
 			t.Fatalf("GRPCAddr: got %q", got.GRPCAddr)
+		}
+	})
+	t.Run("default fsdb dir is tmp under node id", func(t *testing.T) {
+		t.Parallel()
+		fs := flag.NewFlagSet(t.Name(), flag.ContinueOnError)
+		got, err := cfg.ParseNodeFlags(fs, []string{"-id", "node1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join("tmp", "node1")
+		if got.FsDefaultDir != want {
+			t.Fatalf("FsDefaultDir: got %q want %q", got.FsDefaultDir, want)
+		}
+	})
+	t.Run("fsdb dir flag override", func(t *testing.T) {
+		t.Parallel()
+		fs := flag.NewFlagSet(t.Name(), flag.ContinueOnError)
+		got, err := cfg.ParseNodeFlags(fs, []string{"-id", "node1", "-fs-default-dir", "/data/kvs"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.FsDefaultDir != "/data/kvs" {
+			t.Fatalf("FsDefaultDir: got %q", got.FsDefaultDir)
 		}
 	})
 }

@@ -102,6 +102,19 @@ func TestDBMethods(t *testing.T) {
 			},
 		},
 		{
+			name:        "delete after LRU eviction is idempotent (WAL replay)",
+			opts:        memdb.Options{MaxEntriesPerTable: 2},
+			createTable: true,
+			steps: []dbStep{
+				set("a", "", "1"),
+				set("b", "", "2"),
+				set("c", "", "3"),
+				expectGetErr("a", db.ErrNotFound),
+				del("a"),
+				expectGetErr("a", db.ErrNotFound),
+			},
+		},
+		{
 			name:        "get refreshes LRU",
 			opts:        memdb.Options{MaxEntriesPerTable: 2},
 			createTable: true,

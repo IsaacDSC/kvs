@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -12,10 +13,12 @@ var ErrMissingNodeID = errors.New("node id is required (flag -id)")
 
 // NodeFlags holds validated CLI flags for the storage node (identity and listen addresses).
 type NodeFlags struct {
-	ID       string
-	HTTPAddr string
-	GRPCAddr string
-	Peers    []string
+	ID                   string
+	HTTPAddr             string
+	GRPCAddr             string
+	Peers                []string
+	FsDefaultDir         string
+	CheckpointDefaultDir string
 }
 
 // ParseNodeFlags registers node flags on fs, parses args (typically os.Args[1:]),
@@ -25,20 +28,31 @@ func ParseNodeFlags(fs *flag.FlagSet, args []string) (NodeFlags, error) {
 	httpAddr := fs.String("http-addr", "", "node addrs")
 	peersRaw := fs.String("peers", "", "node peers")
 	grpcAddr := fs.String("grpc-addr", ":9080", "gRPC listen address for node-to-node RPCs (e.g. :9001)")
-
+	fsDefaultDir := fs.String("fs-default-dir", "", "fsdb root directory (default: tmp/<-id> after parse)")
+	checkpointDefaultDir := fs.String("checkpoint-default-dir", "", "checkpoint root directory")
 	if err := fs.Parse(args); err != nil {
 		return NodeFlags{}, fmt.Errorf("cfg: parse flags: %w", err)
 	}
 
 	out := NodeFlags{
-		ID:       strings.TrimSpace(*id),
-		HTTPAddr: strings.TrimSpace(*httpAddr),
-		GRPCAddr: strings.TrimSpace(*grpcAddr),
-		Peers:    parsePeers(*peersRaw),
+		ID:                   strings.TrimSpace(*id),
+		HTTPAddr:             strings.TrimSpace(*httpAddr),
+		GRPCAddr:             strings.TrimSpace(*grpcAddr),
+		Peers:                parsePeers(*peersRaw),
+		FsDefaultDir:         strings.TrimSpace(*fsDefaultDir),
+		CheckpointDefaultDir: strings.TrimSpace(*checkpointDefaultDir),
 	}
 
 	if out.ID == "" {
 		return NodeFlags{}, fmt.Errorf("cfg: %w", ErrMissingNodeID)
+	}
+
+	if out.FsDefaultDir == "" {
+		out.FsDefaultDir = filepath.Join("tmp", out.ID)
+	}
+
+	if out.CheckpointDefaultDir == "" {
+		out.CheckpointDefaultDir = filepath.Join("tmp", out.ID, "checkpoint")
 	}
 
 	return out, nil

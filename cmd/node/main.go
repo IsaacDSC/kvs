@@ -20,7 +20,6 @@ import (
 	"github.com/IsaacDSC/kvs/internal/memdb"
 	"github.com/IsaacDSC/kvs/internal/raft"
 	"github.com/IsaacDSC/kvs/internal/raftpb"
-	"github.com/IsaacDSC/kvs/internal/store"
 	"github.com/IsaacDSC/kvs/internal/tasks"
 	"github.com/IsaacDSC/kvs/internal/wal"
 	"github.com/IsaacDSC/kvs/pkg/www"
@@ -28,9 +27,8 @@ import (
 )
 
 const (
-	defaultDir           = "tmp"
-	defaultDataDir       = "tmp/data.wal"
-	defaultCheckpointDir = "tmp/checkpoint"
+	defaultDataDir = "tmp/data.wal"
+	defaultDir     = "tmp"
 )
 
 // Cluster de 3 nós (um terminal por comando; espelha make run1 / run2 / run3):
@@ -59,7 +57,7 @@ func main() {
 		Level: slog.LevelInfo,
 	})).With("node", nodeFlags.ID)
 
-	logger.Info("starting node", "id", nodeFlags.ID, "addrs", nodeFlags.HTTPAddr, "peers", nodeFlags.Peers)
+	logger.Info("starting node", "id", nodeFlags.ID, "addrs", nodeFlags.HTTPAddr, "peers", nodeFlags.Peers, "fsdb", nodeFlags.FsDefaultDir)
 
 	clusterMode := "multi-node"
 	if len(nodeFlags.Peers) == 0 {
@@ -81,7 +79,7 @@ func main() {
 
 	// Filesystem writes go through WriteBatcher before WAL construction so Load can flush
 	// deferred state before post-recovery Checkpoint (LastSeq must not advance ahead of disk).
-	rawFS := fsdb.NewDb(store.DefaultDataDir)
+	rawFS := fsdb.NewDb(nodeFlags.FsDefaultDir)
 	batchOpts := fsdb.WriteBatcherOptions{}
 	if nodeCfg.FSDeferWrites {
 		batchOpts.DeferWrites = true
@@ -91,7 +89,7 @@ func main() {
 
 	wal, err := wal.New(defaultDataDir, wal.Options{
 		Durability: wal.SyncEveryWrite,
-		Checkpoint: wal.CheckpointConfig{Dir: defaultCheckpointDir},
+		Checkpoint: wal.CheckpointConfig{Dir: nodeFlags.CheckpointDefaultDir},
 		BeforeCheckpoint: func(ckptCtx context.Context) error {
 			return batchedFS.Flush(ckptCtx)
 		},
@@ -187,8 +185,8 @@ func main() {
 							logger.Error("failed to set item", "error", err)
 							os.Exit(1)
 						}
-					case commands.DeleteCmd:
-						if err := database.Delete(ctx, entry.Data.TableName, entry.Data.Item.Key); err != nil {
+					case commands.DeleteCmd, commands.OptimisticDelCmd:
+						if err := database.Delete(ctx, entry.Data.TableName, entry.Data.Item.DelItem()); err != nil {
 							logger.Error("failed to delete item", "error", err)
 							os.Exit(1)
 						}

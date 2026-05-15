@@ -1,14 +1,16 @@
-Optimistic Delete
-Optimistic Put
+OK -> Optimistic Delete
+OK -> Optimistic Put
 
 Docker with 3 nodes and share volume data.wal
 
 ACID - Session-Transaction/Commit/Rollback
 
-SDK
+SDK Golang
 
 Charge Tests
 
 Wrapper para responses padronizado utilizando Content-Type: application-json
 
 Configurar Quorum para ao replicar a escrita esperar confirmar(0 não esperando, 1 esperando um ok, 2,3,4... esperando 2,3,4 ok) 
+
+Remover da main o code referente ao handler do GRPC

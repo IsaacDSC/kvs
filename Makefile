@@ -73,6 +73,10 @@ propose:
 		-H 'Content-Type: application/json' \
 		-d '{"command":"$(CMD)"}'
 
+
+test:
+	go test ./... -race
+
 help:
 	@echo "Comandos disponíveis:"
 	@echo "  make build          - Compila o projeto (go build ./...)"
@@ -86,4 +90,5 @@ help:
 	@echo "  make state3         - Mostra /state do node3 (requer jq)"
 	@echo "  make propose        - POST /cmd/propose (ADDR=... CMD=...)"
 	@echo "  make proto  - Gera código Go e gRPC a partir de proto/raft/raft.proto"
+	@echo "  make test   - Executa o testes com mode race para garantir que não tem race-condition"
 	@echo "  make help   - Mostra esta ajuda (é o alvo padrão ao rodar 'make' sem argumentos)"

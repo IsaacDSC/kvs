@@ -16,16 +16,9 @@ type PutDb interface {
 	Set(ctx context.Context, tableName string, item dto.Item) error
 }
 
-type operationType string
-
-const (
-	operationTypeOptimisticLock operationType = "optimistic_lock"
-	operationTypeNormal         operationType = "normal"
-)
-
 type putParams struct {
-	TableName     string        `param:"tableName"`
-	OperationType operationType `query:"operation"`
+	TableName     string            `param:"tableName"`
+	OperationType dto.OperationType `query:"operation"`
 }
 
 func (p *putParams) Validate() error {
@@ -34,10 +27,10 @@ func (p *putParams) Validate() error {
 	}
 
 	if p.OperationType == "" {
-		p.OperationType = operationTypeNormal
+		p.OperationType = dto.OperationTypeNormal
 	}
 
-	validOperationTypes := []operationType{operationTypeOptimisticLock, operationTypeNormal}
+	validOperationTypes := []dto.OperationType{dto.OperationTypeOptimisticLock, dto.OperationTypeNormal}
 	if !slices.Contains(validOperationTypes, p.OperationType) {
 		return errors.New("operation type is invalid")
 	}
@@ -75,7 +68,7 @@ func PutHandler(db PutDb, replicateNodes ReplicateNodes) www.Handler {
 
 			// Security validation only permit save version if use operation equal at OptimisticLock
 			cmd := commands.SetCmd
-			if params.OperationType == operationTypeOptimisticLock {
+			if params.OperationType == dto.OperationTypeOptimisticLock {
 				cmd = commands.OptimisticSetCmd
 			} else {
 				it.Version = nil

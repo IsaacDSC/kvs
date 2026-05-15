@@ -58,36 +58,14 @@ func (f *Adapter) CreateTable(table string) error {
 	return nil
 }
 
-var ErrNotCompatibleVersion = errors.New("error not compatible version")
-
-// getEntityMemThenFS reads from memdb and falls back to fsdb on error. Caller must hold f.mu.
-func (f *Adapter) getEntityMemThenFS(ctx context.Context, tableName, key string) (item.Entity, error) {
-	it, err := f.memdb.Get(ctx, tableName, key)
-	if err != nil {
-		return f.fsdb.Get(ctx, tableName, key)
-	}
-	return it, nil
-}
-
-type Opts string
-
 func (f *Adapter) Set(ctx context.Context, tableName string, it dto.Item) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	entity := it.Entity()
 
-	if it.Version != nil {
-		itdb, err := f.getEntityMemThenFS(ctx, tableName, entity.Key)
-		if err != nil && !errors.Is(ErrNotFound, err) {
-			return fmt.Errorf("error on optimistic set :%w", err)
-		}
-
-		// validate if db version is equal old version received
-		if itdb.Version != it.Version.OldVersion {
-			return ErrNotCompatibleVersion
-		}
-
+	if err := f.validateConsistency(ctx, tableName, it); err != nil {
+		return err
 	}
 
 	if err := f.logdb.Set(ctx, tableName, entity); err != nil {
@@ -132,19 +110,24 @@ func (f *Adapter) GetBySecondaryKey(ctx context.Context, tableName string, secon
 	return its, nil
 }
 
-func (f *Adapter) Delete(ctx context.Context, tableName string, key string) error {
+func (f *Adapter) Delete(ctx context.Context, tableName string, it dto.DeleteItem) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	e := it.Item()
 
-	if err := f.logdb.Delete(ctx, tableName, key); err != nil {
+	if err := f.validateConsistency(ctx, tableName, e); err != nil {
+		return err
+	}
+
+	if err := f.logdb.Delete(ctx, tableName, e.Key); err != nil {
 		return fmt.Errorf("db: wal delete: %w", err)
 	}
 
-	if err := f.fsdb.Del(ctx, tableName, key); err != nil {
+	if err := f.fsdb.Del(ctx, tableName, e.Key); err != nil {
 		return fmt.Errorf("db: delete entity: %w", err)
 	}
 
-	return f.memdb.Del(ctx, tableName, key)
+	return f.memdb.Del(ctx, tableName, e.Key)
 }
 
 func (f *Adapter) Load(ctx context.Context) error {
@@ -170,4 +153,32 @@ func (f *Adapter) Close() error {
 		_ = flusher.Flush(context.Background())
 	}
 	return f.logdb.Close()
+
+}
+
+// getEntityMemThenFS reads from memdb and falls back to fsdb on error. Caller must hold f.mu.
+func (f *Adapter) getEntityMemThenFS(ctx context.Context, tableName, key string) (item.Entity, error) {
+	it, err := f.memdb.Get(ctx, tableName, key)
+	if err != nil {
+		return f.fsdb.Get(ctx, tableName, key)
+	}
+	return it, nil
+}
+
+// validateConsistency check if using optimisticLock then compare db.version with it.OldVersion
+func (f *Adapter) validateConsistency(ctx context.Context, tableName string, it dto.Item) error {
+	if it.Version != nil { // remover code duplicado
+		itdb, err := f.getEntityMemThenFS(ctx, tableName, it.Key)
+		if err != nil && !errors.Is(ErrNotFound, err) {
+			return fmt.Errorf("error on optimistic set :%w", err)
+		}
+
+		// validate if db version is equal old version received
+		if itdb.Version != it.Version.OldVersion {
+			return ErrNotCompatibleVersion
+		}
+
+	}
+
+	return nil
 }

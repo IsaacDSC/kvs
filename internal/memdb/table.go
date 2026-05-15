@@ -2,6 +2,7 @@ package memdb
 
 import (
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/IsaacDSC/kvs/internal/code"
@@ -126,7 +127,10 @@ func (t *table) delete(key string) error {
 func (t *table) deleteEntryLocked(key string) error {
 	b, ok := t.data[key]
 	if !ok {
-		return fmt.Errorf("memdb.delete error on deleting entity: key %s not found", key)
+		// Idempotent: absent key already matches post-delete state. Required for WAL replay
+		// when LRU eviction removed the entry before a later log delete is applied.
+		log.Println("[*] - WARN - error not found key for delete item in table.deleteEntryLocked")
+		return nil
 	}
 
 	var entity item.Entity
