@@ -62,6 +62,9 @@ func (d *Db) Set(ctx context.Context, table string, data item.Entity) error {
 
 	path := filepath.Join(d.defaultDir, table, "key", data.Key)
 	if err := os.WriteFile(path, b, 0644); err != nil {
+		if writeBlockedByMissingPath(err) {
+			return db.ErrTableNotFound
+		}
 		return fmt.Errorf("write put key file: %w", err)
 	}
 
@@ -84,12 +87,21 @@ func (d *Db) Set(ctx context.Context, table string, data item.Entity) error {
 				return fmt.Errorf("marshal keys: %w", err)
 			}
 			if err := os.WriteFile(path, kb, 0644); err != nil {
+				if writeBlockedByMissingPath(err) {
+					return db.ErrTableNotFound
+				}
 				return fmt.Errorf("write put sk file: %w", err)
 			}
 		}
 	}
 
 	return nil
+}
+
+// writeBlockedByMissingPath reports errors typical of Put without CreateTable:
+// missing parent dir (ENOENT) or a path segment that exists but is not a directory (ENOTDIR).
+func writeBlockedByMissingPath(err error) bool {
+	return os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR)
 }
 
 // jsonSafeAny converts values that encoding/json cannot marshal (e.g. map[interface{}]interface{}

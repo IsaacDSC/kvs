@@ -43,7 +43,7 @@ func TestParseNodeFlags(t *testing.T) {
 		if got.FsDefaultDir != wantFS {
 			t.Fatalf("FsDefaultDir: got %q want %q", got.FsDefaultDir, wantFS)
 		}
-		wantWAL := filepath.Join("tmp", "data.wal")
+		wantWAL := filepath.Join("tmp", "node1", "data.wal")
 		if got.WALPath != wantWAL {
 			t.Fatalf("WALPath: got %q want %q", got.WALPath, wantWAL)
 		}

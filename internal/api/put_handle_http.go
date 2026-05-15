@@ -75,7 +75,7 @@ func PutHandler(db PutDb, replicateNodes ReplicateNodes) www.Handler {
 			}
 
 			if err := db.Set(r.Context(), params.TableName, it); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), getStatusCode(err))
 				return
 			}
 
@@ -84,7 +84,7 @@ func PutHandler(db PutDb, replicateNodes ReplicateNodes) www.Handler {
 				TableName: params.TableName,
 				Item:      it,
 			}); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), getStatusCode(err))
 				return
 			}
 
