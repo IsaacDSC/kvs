@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"syscall"
 
 	"github.com/IsaacDSC/kvs/internal/db"
 	"github.com/IsaacDSC/kvs/internal/item"
@@ -158,6 +159,10 @@ func (d *Db) Get(ctx context.Context, table string, key string) (item.Entity, er
 
 	path := filepath.Join(d.defaultDir, table, "key", key)
 	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+		return item.Entity{}, db.ErrNotFound
+	}
+
 	if err != nil {
 		return item.Entity{}, fmt.Errorf("read get key file: %w", err)
 	}

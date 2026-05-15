@@ -17,22 +17,29 @@ curl -s -X PUT "http://localhost:8001/table/test_tb/4321id" \
   -d '{"sk": "familia", "value":{"key2": "value2"}}'
 ```
 
+Create using optimisticLock
+```sh
+curl -s -X PUT "http://localhost:8001/table/test_tb/4321id?operation=optimistic_lock" \
+    -H "Content-Type: application/json" \
+    -d '{"sk": "familia", "value":{"key2": "value2"}, "version": {"old_version": "", "propose_version":"1"}}'
+```
+
 ### Get by key 
 
 ```sh
-curl -s -X GET "http://localhost:8001/table/test_tb/1234id" 
+curl -s -X GET "http://localhost:8001/table/test_tb/4321id" 
 ```
 
 
 ### Find by sk 
 
 ```sh
-curl -i -X GET "http://localhost:8001/table/test_tb?sk=123" 
+curl -X GET "http://localhost:8001/table/test_tb?sk=familia" | jq 
 ```
 
 ### Delete by key
 
 ```sh
-curl -i -X DELETE "http://localhost:8001/table/test_tb/123" 
+curl -i -X DELETE "http://localhost:8001/table/test_tb/4321id" 
 
 ```

@@ -182,7 +182,7 @@ func main() {
 							logger.Error("failed to create table", "error", err)
 							os.Exit(1)
 						}
-					case commands.SetCmd:
+					case commands.SetCmd, commands.OptimisticSetCmd:
 						if err := database.Set(ctx, entry.Data.TableName, entry.Data.Item); err != nil {
 							logger.Error("failed to set item", "error", err)
 							os.Exit(1)

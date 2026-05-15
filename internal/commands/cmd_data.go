@@ -3,13 +3,13 @@ package commands
 import (
 	"fmt"
 
-	"github.com/IsaacDSC/kvs/internal/item"
+	"github.com/IsaacDSC/kvs/internal/dto"
 )
 
 type Data struct {
-	Cmd       Commands    `json:"cmd"`
-	TableName string      `json:"table_name"`
-	Item      item.Entity `json:"item,omitempty"` // optional
+	Cmd       Commands `json:"cmd"`
+	TableName string   `json:"table_name"`
+	Item      dto.Item `json:"item"` // optional
 }
 
 type Database interface {
