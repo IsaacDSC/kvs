@@ -1,7 +1,7 @@
 OK -> Optimistic Delete
 OK -> Optimistic Put
 
-Docker with 3 nodes and share volume data.wal
+OK -> Docker with 3 nodes and share volume data.wal
 
 ACID - Session-Transaction/Commit/Rollback
 

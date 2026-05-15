@@ -23,30 +23,47 @@ proto:
 build:
 	go build ./...
 
+# Docker / CI: defina KVS_NODE_BIN para o binário (ex.: /app/kvs-node) em vez de go run.
+# Rede Docker: sobrescreva PEERS_RUN1 etc. com hostnames dos serviços (ex.: node2:9002).
+# WAL compartilhado: sobrescreva WAL_PATH (ex.: /wal/data.wal) e monte o volume só nesse caminho.
+WAL_PATH ?= tmp/data.wal
+PEERS_RUN1 ?= localhost:9002,localhost:9003
+PEERS_RUN2 ?= localhost:9001,localhost:9003
+PEERS_RUN3 ?= localhost:9001,localhost:9002
+ifdef KVS_NODE_BIN
+NODE_LAUNCH = $(KVS_NODE_BIN)
+else
+NODE_LAUNCH = go run ./cmd/node/main.go
+endif
+
 # Single node leader
 run-single-node: build
-	go run ./cmd/node/main.go -id node1 \
+	$(NODE_LAUNCH) -id node1 \
 		-grpc-addr :9001 -http-addr :8001 \
-		-peers ""
+		-peers "" \
+		-wal-path $(WAL_PATH)
 
 # ── Cluster (open one terminal per target) ─────────────────────────────────
 # Node-to-node RPCs use gRPC on ports 9001/9002/9003.
 # Client API (curl) uses HTTP on ports 8001/8002/8003.
 
 run1:
-	go run ./cmd/node/main.go -id node1 \
+	$(NODE_LAUNCH) -id node1 \
 		-grpc-addr :9001 -http-addr :8001 \
-		-peers localhost:9002,localhost:9003
+		-peers $(PEERS_RUN1) \
+		-wal-path $(WAL_PATH)
 
 run2:
-	go run ./cmd/node/main.go -id node2 \
+	$(NODE_LAUNCH) -id node2 \
 		-grpc-addr :9002 -http-addr :8002 \
-		-peers localhost:9001,localhost:9003
+		-peers $(PEERS_RUN2) \
+		-wal-path $(WAL_PATH)
 
 run3:
-	go run ./cmd/node/main.go -id node3 \
+	$(NODE_LAUNCH) -id node3 \
 		-grpc-addr :9003 -http-addr :8003 \
-		-peers localhost:9001,localhost:9002
+		-peers $(PEERS_RUN3) \
+		-wal-path $(WAL_PATH)
 
 # ── Inspect state ───────────────────────────────────────────────────────────
 

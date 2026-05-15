@@ -1,0 +1,9 @@
+.git
+.github
+.cursor
+tmp
+*.md
+specs
+.env
+.env.*
+!.env.example

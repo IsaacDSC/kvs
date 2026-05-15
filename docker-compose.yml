@@ -1,0 +1,63 @@
+# Cluster de 3 nós: cada serviço executa make run1 / run2 / run3 (binário via KVS_NODE_BIN).
+# gRPC Raft entre node1:9001, node2:9002, node3:9003; HTTP nas portas 8001–8003.
+#
+# O único volume compartilhado é o diretório do WAL (/wal → data.wal). Cada nó mantém fsdb/checkpoint em tmp/<id> dentro do container.
+# Nota: compartilhar um único ficheiro WAL entre réplicas não é o modelo típico de Raft; use apenas se validar o cenário.
+
+services:
+  node1:
+    build: .
+    command: ["make", "run1"]
+    environment:
+      PEERS_RUN1: node2:9002,node3:9003
+      WAL_PATH: /wal/data.wal
+    volumes:
+      - kvs_wal:/wal
+    ports:
+      - "8001:8001"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8001/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  node2:
+    build: .
+    command: ["make", "run2"]
+    environment:
+      PEERS_RUN2: node1:9001,node3:9003
+      WAL_PATH: /wal/data.wal
+    volumes:
+      - kvs_wal:/wal
+    ports:
+      - "8002:8002"
+      - "9002:9002"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8002/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  node3:
+    build: .
+    command: ["make", "run3"]
+    environment:
+      PEERS_RUN3: node1:9001,node2:9002
+      WAL_PATH: /wal/data.wal
+    volumes:
+      - kvs_wal:/wal
+    ports:
+      - "8003:8003"
+      - "9003:9003"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8003/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  kvs_wal:

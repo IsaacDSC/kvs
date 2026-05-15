@@ -43,6 +43,21 @@ func TestParseNodeFlags(t *testing.T) {
 		if got.FsDefaultDir != wantFS {
 			t.Fatalf("FsDefaultDir: got %q want %q", got.FsDefaultDir, wantFS)
 		}
+		wantWAL := filepath.Join("tmp", "data.wal")
+		if got.WALPath != wantWAL {
+			t.Fatalf("WALPath: got %q want %q", got.WALPath, wantWAL)
+		}
+	})
+	t.Run("wal-path override", func(t *testing.T) {
+		t.Parallel()
+		fs := flag.NewFlagSet(t.Name(), flag.ContinueOnError)
+		got, err := cfg.ParseNodeFlags(fs, []string{"-id", "node1", "-wal-path", "/wal/shared.wal"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.WALPath != "/wal/shared.wal" {
+			t.Fatalf("WALPath: got %q", got.WALPath)
+		}
 	})
 	t.Run("default grpc addr", func(t *testing.T) {
 		t.Parallel()

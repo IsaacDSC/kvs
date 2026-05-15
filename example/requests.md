@@ -12,14 +12,14 @@ curl -s -X POST "http://localhost:8001/table" \
 
 ### Creater or update data
 ```sh
-curl -s -X PUT "http://localhost:8001/table/test_tb" \
+curl -i -X PUT "http://localhost:8001/table/test_tb" \
   -H "Content-Type: application/json" \
 -d '{"key": "fordel", "sk": "familia", "value":{"fordel": "fordelvalue"}}'
 ```
 
 Create using optimisticLock
 ```sh
-curl -s -X PUT "http://localhost:8001/table/test_tb?operation=optimistic_lock" \
+curl -i -X PUT "http://localhost:8001/table/test_tb?operation=optimistic_lock" \
     -H "Content-Type: application/json" \
     -d '{"key": "fordel", "sk": "familia", "value":{"keyaa": "valueaa"}, "version": {"old_version": "", "propose_version":"1"}}'
 ```

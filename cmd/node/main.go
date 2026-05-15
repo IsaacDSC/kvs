@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -26,10 +27,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-const (
-	defaultDataDir = "tmp/data.wal"
-	defaultDir     = "tmp"
-)
+const defaultDir = "tmp"
 
 // Cluster de 3 nós (um terminal por comando; espelha make run1 / run2 / run3):
 //
@@ -70,6 +68,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := os.MkdirAll(filepath.Dir(nodeFlags.WALPath), 0o755); err != nil {
+		logger.Error("failed to create wal parent dir", "error", err)
+		os.Exit(1)
+	}
 	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
 		logger.Error("failed to create data dir", "error", err)
 		os.Exit(1)
@@ -87,7 +89,7 @@ func main() {
 	batchedFS := fsdb.NewWriteBatcher(rawFS, batchOpts)
 	defer batchedFS.Stop()
 
-	wal, err := wal.New(defaultDataDir, wal.Options{
+	wal, err := wal.New(nodeFlags.WALPath, wal.Options{
 		Durability: wal.SyncEveryWrite,
 		Checkpoint: wal.CheckpointConfig{Dir: nodeFlags.CheckpointDefaultDir},
 		BeforeCheckpoint: func(ckptCtx context.Context) error {
@@ -142,6 +144,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	routes := []www.Handler{
+		api.PingHandler(),
 		api.CreateTableHandler(database, node),
 		api.PutHandler(database, node),
 		api.DeleteHandler(database, node),

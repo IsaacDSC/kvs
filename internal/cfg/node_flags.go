@@ -17,6 +17,7 @@ type NodeFlags struct {
 	HTTPAddr             string
 	GRPCAddr             string
 	Peers                []string
+	WALPath              string
 	FsDefaultDir         string
 	CheckpointDefaultDir string
 }
@@ -28,6 +29,7 @@ func ParseNodeFlags(fs *flag.FlagSet, args []string) (NodeFlags, error) {
 	httpAddr := fs.String("http-addr", "", "node addrs")
 	peersRaw := fs.String("peers", "", "node peers")
 	grpcAddr := fs.String("grpc-addr", ":9080", "gRPC listen address for node-to-node RPCs (e.g. :9001)")
+	walPath := fs.String("wal-path", filepath.Join("tmp", "data.wal"), "path to WAL file")
 	fsDefaultDir := fs.String("fs-default-dir", "", "fsdb root directory (default: tmp/<-id> after parse)")
 	checkpointDefaultDir := fs.String("checkpoint-default-dir", "", "checkpoint root directory")
 	if err := fs.Parse(args); err != nil {
@@ -39,12 +41,17 @@ func ParseNodeFlags(fs *flag.FlagSet, args []string) (NodeFlags, error) {
 		HTTPAddr:             strings.TrimSpace(*httpAddr),
 		GRPCAddr:             strings.TrimSpace(*grpcAddr),
 		Peers:                parsePeers(*peersRaw),
+		WALPath:              strings.TrimSpace(*walPath),
 		FsDefaultDir:         strings.TrimSpace(*fsDefaultDir),
 		CheckpointDefaultDir: strings.TrimSpace(*checkpointDefaultDir),
 	}
 
 	if out.ID == "" {
 		return NodeFlags{}, fmt.Errorf("cfg: %w", ErrMissingNodeID)
+	}
+
+	if out.WALPath == "" {
+		return NodeFlags{}, fmt.Errorf("cfg: wal-path cannot be empty")
 	}
 
 	if out.FsDefaultDir == "" {
