@@ -25,17 +25,12 @@ const (
 
 type putParams struct {
 	TableName     string        `param:"tableName"`
-	Key           string        `param:"key"`
 	OperationType operationType `query:"operation"`
 }
 
 func (p *putParams) Validate() error {
 	if p.TableName == "" {
 		return errors.New("table name is required")
-	}
-
-	if p.Key == "" {
-		return errors.New("key is required")
 	}
 
 	if p.OperationType == "" {
@@ -52,7 +47,7 @@ func (p *putParams) Validate() error {
 
 func PutHandler(db PutDb, replicateNodes ReplicateNodes) www.Handler {
 	return www.Handler{
-		Pattern: "PUT /table/{tableName}/{key}",
+		Pattern: "PUT /table/{tableName}",
 		Fn: func(w http.ResponseWriter, r *http.Request) {
 			var params putParams
 			if err := www.DecodeParams(r, &params); err != nil {

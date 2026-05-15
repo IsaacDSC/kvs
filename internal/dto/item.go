@@ -11,7 +11,7 @@ type Item struct {
 	Key     string         `json:"key"`
 	SK      string         `json:"sk"`
 	Value   map[string]any `json:"value"`
-	Version *Version       `json:"version"`
+	Version *Version       `json:"version,omitempty"`
 }
 
 type Version struct {
