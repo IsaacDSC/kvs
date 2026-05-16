@@ -298,3 +298,20 @@ func (b *WriteBatcher) GetBySk(ctx context.Context, tableName string, secondaryK
 	}
 	return b.inner.GetBySk(ctx, tableName, secondaryKey)
 }
+
+// ReplaceWithCheckpointBlobs clears buffered writes and restores the inner store from WAL checkpoint blobs.
+func (b *WriteBatcher) ReplaceWithCheckpointBlobs(ctx context.Context, tables map[string]map[string][]byte) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.pend = make(map[mergeKey]batchOp)
+	b.bytesN = 0
+
+	h, ok := b.inner.(db.CheckpointBlobHydrator)
+	if !ok {
+		return fmt.Errorf("fsdb write batcher: inner %T does not implement db.CheckpointBlobHydrator", b.inner)
+	}
+	return h.ReplaceWithCheckpointBlobs(ctx, tables)
+}
+
+var _ db.CheckpointBlobHydrator = (*WriteBatcher)(nil)

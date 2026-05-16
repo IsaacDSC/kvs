@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
+	"github.com/IsaacDSC/kvs/internal/db"
 	"github.com/IsaacDSC/kvs/internal/item"
 )
 
@@ -90,25 +91,21 @@ func (w *WAL) Delete(ctx context.Context, tableName string, key string) error {
 	return w.maybeAutoCheckpointLocked()
 }
 
-// Load recovers state by replaying the WAL into the given Operations targets.
+// Load recovers fsdb-compatible state after a checkpoint metadata write.
 //
-// When CheckpointDir is set, it reads LastSeq from durable storage. A checkpoint means:
-// the durable store (typically fsdb on disk, possibly behind a WriteBatcher) must already
-// reflect every mutation with Entry.Seq <= LastSeq before LastSeq was saved. The WAL then
-// replays only entries with Seq > LastSeq onto the appropriate targets.
+// When CheckpointDir is set, LastSeq defines the WAL prefix already materialised on durable
+// storage; only entries with Seq > LastSeq are replayed onto the single [commands.Operations]
+// target (typically *fsdb.Db or [fsdb.WriteBatcher]). If checkpoint.cbor embeds optional table blobs,
+// the target must implement [db.CheckpointBlobHydrator] — those blobs are applied first, then
+// the tail replay runs.
 //
-// With two targets (volatile + durable), the first receives a full replay from the start of
-// the WAL unless a table snapshot is present in the checkpoint file (see durable package);
-// in that case the first target is hydrated from the snapshot and both targets receive only
-// the tail (Seq > LastSeq). The last target always receives tail-only replay so on-disk
-// state is not double-applied.
-//
-// After successful recovery, when checkpoint is configured, Load calls Checkpoint() so
-// LastSeq on disk matches the highest Seq applied (and BeforeCheckpoint can flush batchers).
+// After successful recovery, when checkpoint is configured, Load invokes [WAL.Checkpoint]
+// so LastSeq on disk advances to the replayed Seq (after [Options.BeforeCheckpoint] flushes batchers).
 func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error {
-	if len(operations) == 0 {
-		return errors.New("wal: load requires at least one operations")
+	if len(operations) != 1 {
+		return fmt.Errorf("wal: load requires exactly one operations target, got %d", len(operations))
 	}
+	opsTarget := operations[0]
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -153,66 +150,25 @@ func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error
 		}
 	}
 
-	// applyAll func aply in list operations received (fsdb and memdb)
-	applyAll := func(targets []commands.Operations, e Entry) error {
-		for _, ops := range targets {
-			if err := applyEntry(ops, e); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
 	var lastSeq uint64
 	var tableBlobs map[string]map[string][]byte
 	if w.opts.CheckpointConfigured() {
-		var err error
-		lastSeq, tableBlobs, err = w.opts.CheckpointStore.ReadCheckpointTables(w.opts.CheckpointDir)
-		if err != nil {
-			return fmt.Errorf("wal: load checkpoint: %w", err)
+		var ckerr error
+		lastSeq, tableBlobs, ckerr = w.opts.CheckpointStore.ReadCheckpointTables(w.opts.CheckpointDir)
+		if ckerr != nil {
+			return fmt.Errorf("wal: load checkpoint: %w", ckerr)
 		}
 	}
 	hasSnap := len(tableBlobs) > 0
 	if hasSnap {
-		if err := w.hydrateCheckpointIfNeeded(ctx, operations[0], tableBlobs); err != nil {
+		if err := w.hydrateCheckpointIfNeeded(ctx, opsTarget, tableBlobs); err != nil {
 			return err
 		}
 	}
 
-	var maxSeq uint64
-	var err error
-	switch len(operations) {
-	case 1:
-		maxSeq, err = w.replaySince(lastSeq, func(e Entry) error {
-			return applyAll(operations, e)
-		})
-	default:
-		if hasSnap {
-			maxSeq, err = w.replaySince(lastSeq, func(e Entry) error {
-				return applyAll(operations, e)
-			})
-		} else {
-			// Volatile stores (e.g. memdb) start empty: they need the full WAL. The durable tail
-			// (typically fsdb) only replays Seq > lastSeq — prefix is assumed on disk.
-			prefix := operations[:len(operations)-1]
-			tail := operations[len(operations)-1]
-			maxSeq, err = w.replaySince(0, func(e Entry) error {
-				return applyAll(prefix, e)
-			})
-			if err != nil {
-				return fmt.Errorf("db: replay wal (full): %w", err)
-			}
-			maxTail, errTail := w.replaySince(lastSeq, func(e Entry) error {
-				return applyEntry(tail, e)
-			})
-			if errTail != nil {
-				return fmt.Errorf("db: replay wal (tail): %w", errTail)
-			}
-			if maxTail > maxSeq {
-				maxSeq = maxTail
-			}
-		}
-	}
+	maxSeq, err := w.replaySince(lastSeq, func(e Entry) error {
+		return applyEntry(opsTarget, e)
+	})
 	if err != nil {
 		return fmt.Errorf("db: replay wal: %w", err)
 	}
@@ -234,9 +190,9 @@ func (w *WAL) hydrateCheckpointIfNeeded(ctx context.Context, first commands.Oper
 	if len(blobs) == 0 {
 		return nil
 	}
-	h, ok := first.(CheckpointBlobHydrator)
+	h, ok := first.(db.CheckpointBlobHydrator)
 	if !ok {
-		return fmt.Errorf("wal: checkpoint has table data but %T does not implement CheckpointBlobHydrator", first)
+		return fmt.Errorf("wal: checkpoint has table data but %T does not implement db.CheckpointBlobHydrator", first)
 	}
 	if err := h.ReplaceWithCheckpointBlobs(ctx, blobs); err != nil {
 		return fmt.Errorf("wal: apply checkpoint snapshot: %w", err)

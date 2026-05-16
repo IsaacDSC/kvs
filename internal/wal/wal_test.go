@@ -2,16 +2,19 @@ package wal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/IsaacDSC/kvs/internal/code"
+	"github.com/IsaacDSC/kvs/internal/db"
 	"github.com/IsaacDSC/kvs/internal/durable"
+	"github.com/IsaacDSC/kvs/internal/fsdb"
 	"github.com/IsaacDSC/kvs/internal/item"
-	"github.com/IsaacDSC/kvs/internal/memdb"
 )
 
 func TestMain(m *testing.M) {
@@ -20,6 +23,43 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	os.Exit(m.Run())
+}
+
+// seedPersistedPrefix materialises WAL entries with Seq <= checkpoint on fsdb before tail replay tests.
+func seedPersistedPrefix(ctx context.Context, fsRoot string, tab string, keys []string) (*fsdb.Db, error) {
+	d := fsdb.NewDb(fsRoot)
+	if err := d.CreateTable(tab); err != nil {
+		return nil, err
+	}
+	for _, k := range keys {
+		if err := d.Set(ctx, tab, item.Entity{Key: k, Value: k}); err != nil {
+			return nil, err
+		}
+	}
+	return d, nil
+}
+
+func TestLoad_requiresExactlyOneOperations(t *testing.T) {
+	ctx := context.Background()
+	codec := code.NewCBOR()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+	w2, err := New(walPath, Options{Durability: SyncEveryWrite}, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+
+	a := fsdb.NewDb(filepath.Join(dir, "a"))
+	b := fsdb.NewDb(filepath.Join(dir, "b"))
+	if err := w2.Load(ctx, a, b); err == nil {
+		t.Fatal("expected error for multiple ops targets")
+	}
+	if err := w2.Load(ctx); err == nil {
+		t.Fatal("expected error for zero ops targets")
+	} else if !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func TestLoad_replaysOnlyAfterCheckpointSeq(t *testing.T) {
@@ -59,85 +99,23 @@ func TestLoad_replaysOnlyAfterCheckpointSeq(t *testing.T) {
 	}
 	defer w2.Close()
 
-	db := memdb.NewDB(memdb.Options{})
-	if err := w2.Load(ctx, db); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := db.Get(ctx, tab, "k1"); err == nil {
-		t.Fatal("expected k1 missing after partial replay")
-	}
-	if _, err := db.Get(ctx, tab, "k2"); err == nil {
-		t.Fatal("expected k2 missing after partial replay")
-	}
-	got, err := db.Get(ctx, tab, "k3")
+	fsRoot := filepath.Join(dir, "fsdb")
+	dd, err := seedPersistedPrefix(ctx, fsRoot, tab, []string{"k1", "k2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Key != "k3" {
-		t.Fatalf("k3: %+v", got)
+
+	if err := w2.Load(ctx, dd); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, k := range []string{"k1", "k2", "k3"} {
+		if _, err := dd.Get(ctx, tab, k); err != nil {
+			t.Fatalf("missing %s: %v", k, err)
+		}
 	}
 	if w2.seq != 3 {
 		t.Fatalf("w.seq after load: got %d want 3", w2.seq)
-	}
-}
-
-// Two backends: prefix targets get a full replay; the last target gets tail-only replay (checkpoint).
-func TestLoad_twoBackends_fullThenTail(t *testing.T) {
-	ctx := context.Background()
-	codec := code.NewCBOR()
-	dir := t.TempDir()
-	walPath := filepath.Join(dir, "test.wal")
-	ckptDir := filepath.Join(dir, "ckpt")
-
-	opts := Options{
-		Durability:      SyncEveryWrite,
-		CheckpointDir:   ckptDir,
-		CheckpointStore: durable.NewFileCheckpointStore(),
-	}
-	w, err := New(walPath, opts, codec)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tab := "t"
-	for _, k := range []string{"k1", "k2", "k3"} {
-		if err := w.Set(ctx, tab, item.Entity{Key: k, Value: k}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := durable.SaveLastSeq(ckptDir, 2); err != nil {
-		t.Fatal(err)
-	}
-
-	w2, err := New(walPath, opts, codec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w2.Close()
-
-	memFull := memdb.NewDB(memdb.Options{})
-	memTail := memdb.NewDB(memdb.Options{})
-	if err := w2.Load(ctx, memFull, memTail); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, k := range []string{"k1", "k2", "k3"} {
-		if _, err := memFull.Get(ctx, tab, k); err != nil {
-			t.Fatalf("memFull missing %s: %v", k, err)
-		}
-	}
-	for _, k := range []string{"k1", "k2"} {
-		if _, err := memTail.Get(ctx, tab, k); err == nil {
-			t.Fatalf("memTail should not have %s after tail-only replay", k)
-		}
-	}
-	if _, err := memTail.Get(ctx, tab, "k3"); err != nil {
-		t.Fatalf("memTail missing k3: %v", err)
 	}
 }
 
@@ -164,11 +142,11 @@ func TestLoad_fullReplayWhenNoCheckpointDir(t *testing.T) {
 	}
 	defer w2.Close()
 
-	db := memdb.NewDB(memdb.Options{})
-	if err := w2.Load(ctx, db); err != nil {
+	dbInst := fsdb.NewDb(filepath.Join(dir, "fs"))
+	if err := w2.Load(ctx, dbInst); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Get(ctx, tab, "a"); err != nil {
+	if _, err := dbInst.Get(ctx, tab, "a"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -235,11 +213,12 @@ func TestCheckpoint_truncateLeavesSeqForAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w2.Close()
-	db := memdb.NewDB(memdb.Options{})
-	if err := w2.Load(ctx, db); err != nil {
+
+	dbInst := fsdb.NewDb(filepath.Join(dir, "fs-empty"))
+	if err := w2.Load(ctx, dbInst); err != nil {
 		t.Fatal(err)
 	}
-	got, err := db.Get(ctx, "t", "y")
+	got, err := dbInst.Get(ctx, "t", "y")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +227,7 @@ func TestCheckpoint_truncateLeavesSeqForAppend(t *testing.T) {
 	}
 }
 
-func TestLoad_snapshotHydratesThenTailOnTwoBackends(t *testing.T) {
+func TestLoad_snapshotHydratesThenTail(t *testing.T) {
 	ctx := context.Background()
 	codec := code.NewCBOR()
 	dir := t.TempDir()
@@ -274,16 +253,15 @@ func TestLoad_snapshotHydratesThenTailOnTwoBackends(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapMem := memdb.NewDB(memdb.Options{})
-	if err := snapMem.CreateTable(tab); err != nil {
-		t.Fatal(err)
-	}
+	blobs := make(map[string][]byte)
 	for _, k := range []string{"k1", "k2"} {
-		if err := snapMem.Set(ctx, tab, item.Entity{Key: k, Value: k}); err != nil {
-			t.Fatal(err)
+		raw, encErr := codec.Encode(item.Entity{Key: k, Value: k})
+		if encErr != nil {
+			t.Fatal(encErr)
 		}
+		blobs[k] = raw
 	}
-	if err := durable.SaveCheckpointMemdb(ckptDir, snapMem, 2); err != nil {
+	if err := durable.SaveCheckpointTableBlobs(ckptDir, 2, map[string]map[string][]byte{tab: blobs}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -293,23 +271,68 @@ func TestLoad_snapshotHydratesThenTailOnTwoBackends(t *testing.T) {
 	}
 	defer w2.Close()
 
-	mem := memdb.NewDB(memdb.Options{})
-	tail := memdb.NewDB(memdb.Options{})
-	if err := w2.Load(ctx, mem, tail); err != nil {
+	dbInst := fsdb.NewDb(filepath.Join(dir, "fs-restore"))
+	if err := w2.Load(ctx, dbInst); err != nil {
 		t.Fatal(err)
 	}
 	for _, k := range []string{"k1", "k2", "k3"} {
-		if _, err := mem.Get(ctx, tab, k); err != nil {
-			t.Fatalf("mem missing %s: %v", k, err)
+		if _, err := dbInst.Get(ctx, tab, k); err != nil {
+			t.Fatalf("missing %s: %v", k, err)
 		}
 	}
-	for _, k := range []string{"k1", "k2"} {
-		if _, err := tail.Get(ctx, tab, k); err == nil {
-			t.Fatalf("tail should not have %s", k)
+}
+
+func TestLoad_writeBatcherImplementsCheckpointHydrator(t *testing.T) {
+	ctx := context.Background()
+	codec := code.NewCBOR()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+	ckptDir := filepath.Join(dir, "ckpt")
+
+	opts := Options{
+		Durability:      SyncEveryWrite,
+		CheckpointDir:   ckptDir,
+		CheckpointStore: durable.NewFileCheckpointStore(),
+	}
+	w, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab := "t"
+	for _, k := range []string{"k1"} {
+		if err := w.Set(ctx, tab, item.Entity{Key: k, Value: k}); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if _, err := tail.Get(ctx, tab, "k3"); err != nil {
-		t.Fatalf("tail missing k3: %v", err)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := codec.Encode(item.Entity{Key: "k1", Value: "from-checkpoint"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := durable.SaveCheckpointTableBlobs(ckptDir, 1, map[string]map[string][]byte{tab: {"k1": raw}}); err != nil {
+		t.Fatal(err)
+	}
+
+	w2, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+
+	inner := fsdb.NewDb(filepath.Join(dir, "fs-inner"))
+	batched := fsdb.NewWriteBatcher(inner, fsdb.WriteBatcherOptions{})
+	if err := w2.Load(ctx, batched); err != nil {
+		t.Fatal(err)
+	}
+	got, err := batched.Get(ctx, tab, "k1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Value != "from-checkpoint" {
+		t.Fatalf("hydrated Value: %#v", got.Value)
 	}
 }
 
@@ -361,12 +384,24 @@ func TestLoad_repairTruncatedTailWithPartialReplay(t *testing.T) {
 	}
 	defer w2.Close()
 
-	db := memdb.NewDB(memdb.Options{})
-	if err := w2.Load(ctx, db); err != nil {
+	fsRoot := filepath.Join(dir, "fsdb-seed")
+	dd, err := seedPersistedPrefix(ctx, fsRoot, tab, []string{"k1", "k2"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Get(ctx, tab, "k3"); err == nil {
+
+	if err := w2.Load(ctx, dd); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"k1", "k2"} {
+		if _, err := dd.Get(ctx, tab, k); err != nil {
+			t.Fatalf("missing seeded %s: %v", k, err)
+		}
+	}
+	if _, err := dd.Get(ctx, tab, "k3"); err == nil {
 		t.Fatal("expected incomplete k3 record dropped after repair")
+	} else if !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("unexpected err for missing k3: %v", err)
 	}
 }
 

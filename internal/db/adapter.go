@@ -27,17 +27,14 @@ type LogDb interface {
 }
 
 type Adapter struct {
-	mu sync.Mutex
-
-	memdb DB
-	fsdb  DB
+	mu    sync.Mutex
+	store DB
 	logdb LogDb
 }
 
-func New(memdb DB, fsdb DB, logDb LogDb) *Adapter {
+func New(store DB, logDb LogDb) *Adapter {
 	return &Adapter{
-		memdb: memdb,
-		fsdb:  fsdb,
+		store: store,
 		logdb: logDb,
 	}
 
@@ -47,15 +44,7 @@ func (f *Adapter) CreateTable(table string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if err := f.fsdb.CreateTable(table); err != nil {
-		return err
-	}
-
-	if err := f.memdb.CreateTable(table); err != nil {
-		return err
-	}
-
-	return nil
+	return f.store.CreateTable(table)
 }
 
 func (f *Adapter) Set(ctx context.Context, tableName string, it dto.Item) error {
@@ -72,42 +61,25 @@ func (f *Adapter) Set(ctx context.Context, tableName string, it dto.Item) error 
 		return fmt.Errorf("db: wal set: %w", err)
 	}
 
-	if err := f.fsdb.Set(ctx, tableName, entity); err != nil {
+	if err := f.store.Set(ctx, tableName, entity); err != nil {
 		return fmt.Errorf("db: put entity: %w", err)
 	}
-
-	return f.memdb.Set(ctx, tableName, entity)
+	return nil
 }
 
-/*
-Get reads a value from the database.
-
-Case not found in memmory search, it will be searched in the filesystem.
-*/
+// Get reads a value from persistent storage (filesystem-backed store behind this adapter).
 func (f *Adapter) Get(ctx context.Context, tableName string, key string) (item.Entity, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	it, err := f.getEntityMemThenFS(ctx, tableName, key)
-	if err != nil {
-		return item.Entity{}, err
-	}
-	return it, nil
+	return f.store.Get(ctx, tableName, key)
 }
 
 func (f *Adapter) GetBySecondaryKey(ctx context.Context, tableName string, secondaryKey string) ([]item.Entity, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	its, err := f.memdb.GetBySk(ctx, tableName, secondaryKey)
-	if err != nil {
-		its, err = f.fsdb.GetBySk(ctx, tableName, secondaryKey)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return its, nil
+	return f.store.GetBySk(ctx, tableName, secondaryKey)
 }
 
 func (f *Adapter) Delete(ctx context.Context, tableName string, it dto.DeleteItem) error {
@@ -123,18 +95,18 @@ func (f *Adapter) Delete(ctx context.Context, tableName string, it dto.DeleteIte
 		return fmt.Errorf("db: wal delete: %w", err)
 	}
 
-	if err := f.fsdb.Del(ctx, tableName, e.Key); err != nil {
+	if err := f.store.Del(ctx, tableName, e.Key); err != nil {
 		return fmt.Errorf("db: delete entity: %w", err)
 	}
 
-	return f.memdb.Del(ctx, tableName, e.Key)
+	return nil
 }
 
 func (f *Adapter) Load(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if err := f.logdb.Load(ctx, f.memdb, f.fsdb); err != nil {
+	if err := f.logdb.Load(ctx, f.store); err != nil {
 		return fmt.Errorf("db: load wal: %w", err)
 	}
 
@@ -147,7 +119,7 @@ func (f *Adapter) Close() error {
 	if f.logdb == nil {
 		return nil
 	}
-	if flusher, ok := f.fsdb.(interface {
+	if flusher, ok := f.store.(interface {
 		Flush(ctx context.Context) error
 	}); ok {
 		_ = flusher.Flush(context.Background())
@@ -156,19 +128,10 @@ func (f *Adapter) Close() error {
 
 }
 
-// getEntityMemThenFS reads from memdb and falls back to fsdb on error. Caller must hold f.mu.
-func (f *Adapter) getEntityMemThenFS(ctx context.Context, tableName, key string) (item.Entity, error) {
-	it, err := f.memdb.Get(ctx, tableName, key)
-	if err != nil {
-		return f.fsdb.Get(ctx, tableName, key)
-	}
-	return it, nil
-}
-
 // validateConsistency check if using optimisticLock then compare db.version with it.OldVersion
 func (f *Adapter) validateConsistency(ctx context.Context, tableName string, it dto.Item) error {
 	if it.Version != nil { // remover code duplicado
-		itdb, err := f.getEntityMemThenFS(ctx, tableName, it.Key)
+		itdb, err := f.store.Get(ctx, tableName, it.Key)
 		if err != nil && !errors.Is(ErrNotFound, err) {
 			return fmt.Errorf("error on optimistic set :%w", err)
 		}

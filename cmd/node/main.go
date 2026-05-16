@@ -19,7 +19,6 @@ import (
 	"github.com/IsaacDSC/kvs/internal/db"
 	"github.com/IsaacDSC/kvs/internal/durable"
 	"github.com/IsaacDSC/kvs/internal/fsdb"
-	"github.com/IsaacDSC/kvs/internal/memdb"
 	"github.com/IsaacDSC/kvs/internal/raft"
 	"github.com/IsaacDSC/kvs/internal/raftpb"
 	"github.com/IsaacDSC/kvs/internal/tasks"
@@ -38,7 +37,7 @@ const defaultDir = "tmp"
 //
 // Checkpoint WAL (LastSeq) periódico: ver CHECKPOINT_INTERVAL em .env / env (default 5m; 0 desliga).
 // Flush do batcher fsdb: FS_FLUSH_INTERVAL; FS_PERIODIC_POLL_INTERVAL (gatilho por tamanho, min 100ms); FS_FLUSH_OP_TIMEOUT (min 1s).
-// Memdb LRU: MEMDB_MAX_ENTRIES (default 1000; 0=ilimitado) — ver internal/cfg e .envrc.
+// Estado KV: apenas WAL + fsdb (persistência em disco sob -fs-default-dir).
 func main() {
 	nodeFlags, err := cfg.ParseNodeFlags(flag.CommandLine, os.Args[1:])
 	if err != nil {
@@ -102,7 +101,7 @@ func main() {
 		panic(err)
 	}
 
-	database := db.New(memdb.NewDB(memdb.Options{MaxEntriesPerTable: nodeCfg.MemDBMaxEntries}), batchedFS, wal)
+	database := db.New(batchedFS, wal)
 	defer database.Close()
 
 	//  Read the WAL and apply the operations to the database
@@ -159,7 +158,7 @@ func main() {
 		mux.HandleFunc(r.Pattern, r.Fn)
 	}
 
-	httpSrv := &http.Server{Addr: nodeFlags.HTTPAddr, Handler: mux}
+	httpSrv := &http.Server{Addr: nodeFlags.HTTPAddr, Handler: www.RequestLatency(logger)(mux)}
 
 	go func() {
 		logger.Info("HTTP listening", "addr", nodeFlags.HTTPAddr, "peers", nodeFlags.Peers, "cluster-mode", clusterMode)
