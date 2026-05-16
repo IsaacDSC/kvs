@@ -1,13 +1,7 @@
 package durable
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
-
-	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/IsaacDSC/kvs/internal/old/memdb"
-	"github.com/fxamacker/cbor/v2"
 )
 
 type checkpointFile struct {
@@ -23,21 +17,12 @@ type tableSnap struct {
 
 // LoadCheckpoint restores DB state from checkpoint.cbor, returning the stored last sequence.
 func LoadCheckpoint(dir string, database *memdb.DB) (lastSeq uint64, err error) {
-	conf := cfg.Get()
-	path := filepath.Join(dir, conf.CheckpointFileName)
-	raw, err := os.ReadFile(path)
+	cf, err := parseCheckpointDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
 		return 0, err
 	}
-	var cf checkpointFile
-	if err := cbor.Unmarshal(raw, &cf); err != nil {
-		return 0, err
-	}
-	if cf.Version != 1 {
-		return 0, fmt.Errorf("durable: unsupported checkpoint version %d", cf.Version)
+	if len(cf.Tables) == 0 {
+		return cf.LastSeq, nil
 	}
 	database.Lock.Lock()
 	defer database.Lock.Unlock()
@@ -49,8 +34,6 @@ func LoadCheckpoint(dir string, database *memdb.DB) (lastSeq uint64, err error) 
 
 // SaveCheckpoint writes the current DB state and last sequence atomically.
 func SaveCheckpoint(dir string, database *memdb.DB, lastSeq uint64) error {
-	conf := cfg.Get()
-
 	cf := checkpointFile{
 		Version: 1,
 		LastSeq: lastSeq,
@@ -63,16 +46,7 @@ func SaveCheckpoint(dir string, database *memdb.DB, lastSeq uint64) error {
 	}
 	database.Lock.RUnlock()
 
-	raw, err := cbor.Marshal(cf)
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(dir, conf.CheckpointFileName)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeCheckpointAtomic(dir, cf)
 }
 
 func copyBytesMap(m map[string][]byte) map[string][]byte {

@@ -55,3 +55,23 @@ func TestLoadLastSeq_corruptFile(t *testing.T) {
 		t.Fatal("expected error for corrupt checkpoint")
 	}
 }
+
+// Stale checkpoint.cbor.tmp must not affect reading the committed checkpoint.cbor.
+func TestLoadLastSeq_ignoresStaleTmp(t *testing.T) {
+	conf := cfg.Get()
+	dir := t.TempDir()
+	if err := SaveLastSeq(dir, 7); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, conf.CheckpointFileName) + ".tmp"
+	if err := os.WriteFile(tmp, []byte("garbage-tmp-from-interrupted-write"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadLastSeq(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 7 {
+		t.Fatalf("got %d want 7", got)
+	}
+}

@@ -29,7 +29,11 @@ func TestLoad_replaysOnlyAfterCheckpointSeq(t *testing.T) {
 	walPath := filepath.Join(dir, "test.wal")
 	ckptDir := filepath.Join(dir, "ckpt")
 
-	opts := Options{Durability: SyncEveryWrite, Checkpoint: CheckpointConfig{Dir: ckptDir}}
+	opts := Options{
+		Durability:      SyncEveryWrite,
+		CheckpointDir:   ckptDir,
+		CheckpointStore: durable.NewFileCheckpointStore(),
+	}
 	w, err := New(walPath, opts, codec)
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +90,11 @@ func TestLoad_twoBackends_fullThenTail(t *testing.T) {
 	walPath := filepath.Join(dir, "test.wal")
 	ckptDir := filepath.Join(dir, "ckpt")
 
-	opts := Options{Durability: SyncEveryWrite, Checkpoint: CheckpointConfig{Dir: ckptDir}}
+	opts := Options{
+		Durability:      SyncEveryWrite,
+		CheckpointDir:   ckptDir,
+		CheckpointStore: durable.NewFileCheckpointStore(),
+	}
 	w, err := New(walPath, opts, codec)
 	if err != nil {
 		t.Fatal(err)
@@ -183,8 +191,10 @@ func TestCheckpoint_truncateLeavesSeqForAppend(t *testing.T) {
 	walPath := filepath.Join(dir, "test.wal")
 	ckptDir := filepath.Join(dir, "ckpt")
 	opts := Options{
-		Durability: SyncEveryWrite,
-		Checkpoint: CheckpointConfig{Dir: ckptDir, TruncateAfterCheckpoint: true},
+		Durability:       SyncEveryWrite,
+		CheckpointDir:    ckptDir,
+		CheckpointPolicy: CheckpointPolicy{TruncateAfterCheckpoint: true},
+		CheckpointStore:  durable.NewFileCheckpointStore(),
 	}
 	w, err := New(walPath, opts, codec)
 	if err != nil {
@@ -235,5 +245,188 @@ func TestCheckpoint_truncateLeavesSeqForAppend(t *testing.T) {
 	}
 	if got.Key != "y" {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestLoad_snapshotHydratesThenTailOnTwoBackends(t *testing.T) {
+	ctx := context.Background()
+	codec := code.NewCBOR()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+	ckptDir := filepath.Join(dir, "ckpt")
+
+	opts := Options{
+		Durability:      SyncEveryWrite,
+		CheckpointDir:   ckptDir,
+		CheckpointStore: durable.NewFileCheckpointStore(),
+	}
+	w, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab := "t"
+	for _, k := range []string{"k1", "k2", "k3"} {
+		if err := w.Set(ctx, tab, item.Entity{Key: k, Value: k}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	snapMem := memdb.NewDB(memdb.Options{})
+	if err := snapMem.CreateTable(tab); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"k1", "k2"} {
+		if err := snapMem.Set(ctx, tab, item.Entity{Key: k, Value: k}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := durable.SaveCheckpointMemdb(ckptDir, snapMem, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	w2, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+
+	mem := memdb.NewDB(memdb.Options{})
+	tail := memdb.NewDB(memdb.Options{})
+	if err := w2.Load(ctx, mem, tail); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"k1", "k2", "k3"} {
+		if _, err := mem.Get(ctx, tab, k); err != nil {
+			t.Fatalf("mem missing %s: %v", k, err)
+		}
+	}
+	for _, k := range []string{"k1", "k2"} {
+		if _, err := tail.Get(ctx, tab, k); err == nil {
+			t.Fatalf("tail should not have %s", k)
+		}
+	}
+	if _, err := tail.Get(ctx, tab, "k3"); err != nil {
+		t.Fatalf("tail missing k3: %v", err)
+	}
+}
+
+func TestLoad_repairTruncatedTailWithPartialReplay(t *testing.T) {
+	ctx := context.Background()
+	codec := code.NewCBOR()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+	ckptDir := filepath.Join(dir, "ckpt")
+	opts := Options{
+		Durability:      SyncEveryWrite,
+		CheckpointDir:   ckptDir,
+		CheckpointStore: durable.NewFileCheckpointStore(),
+	}
+	w, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab := "t"
+	for _, k := range []string{"k1", "k2", "k3"} {
+		if err := w.Set(ctx, tab, item.Entity{Key: k, Value: k}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := durable.SaveLastSeq(ckptDir, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) < 8 {
+		t.Fatal("wal too small")
+	}
+	if err := os.WriteFile(walPath, b[:len(b)-5], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RepairTruncatesTail(walPath); err != nil {
+		t.Fatal(err)
+	}
+
+	w2, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+
+	db := memdb.NewDB(memdb.Options{})
+	if err := w2.Load(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Get(ctx, tab, "k3"); err == nil {
+		t.Fatal("expected incomplete k3 record dropped after repair")
+	}
+}
+
+func TestCheckpoint_everyNWrites(t *testing.T) {
+	ctx := context.Background()
+	codec := code.NewCBOR()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+	ckptDir := filepath.Join(dir, "ckpt")
+	opts := Options{
+		Durability:       SyncEveryWrite,
+		CheckpointDir:    ckptDir,
+		CheckpointPolicy: CheckpointPolicy{EveryNWrites: 2},
+		CheckpointStore:  durable.NewFileCheckpointStore(),
+	}
+	w, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.Set(ctx, "t", item.Entity{Key: "a", Value: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Set(ctx, "t", item.Entity{Key: "b", Value: 2}); err != nil {
+		t.Fatal(err)
+	}
+	seq, err := durable.LoadLastSeq(ckptDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 2 {
+		t.Fatalf("LoadLastSeq after every-2-writes checkpoint: got %d want 2", seq)
+	}
+}
+
+func TestCheckpoint_maxWalBytes(t *testing.T) {
+	ctx := context.Background()
+	codec := code.NewCBOR()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+	ckptDir := filepath.Join(dir, "ckpt")
+	opts := Options{
+		Durability:       SyncEveryWrite,
+		CheckpointDir:    ckptDir,
+		CheckpointPolicy: CheckpointPolicy{MaxWalBytes: 64},
+		CheckpointStore:  durable.NewFileCheckpointStore(),
+	}
+	w, err := New(walPath, opts, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.Set(ctx, "t", item.Entity{Key: "a", Value: make([]byte, 128)}); err != nil {
+		t.Fatal(err)
+	}
+	seq, err := durable.LoadLastSeq(ckptDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 1 {
+		t.Fatalf("LoadLastSeq after size-triggered checkpoint: got %d want 1", seq)
 	}
 }

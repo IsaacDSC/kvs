@@ -9,9 +9,9 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
-	"github.com/IsaacDSC/kvs/internal/durable"
 	"github.com/IsaacDSC/kvs/internal/item"
 )
 
@@ -28,6 +28,10 @@ type WAL struct {
 	bufw  *bufio.Writer
 	seq   uint64
 	codec Codec
+	mu    sync.Mutex
+
+	writesSinceCkpt uint64
+	bytesSinceCkpt  int64
 }
 
 func New(path string, opts Options, codec Codec) (*WAL, error) {
@@ -46,13 +50,16 @@ func New(path string, opts Options, codec Codec) (*WAL, error) {
 }
 
 func (w *WAL) Set(ctx context.Context, tableName string, entity item.Entity) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	b, err := w.codec.Encode(entity)
 	if err != nil {
 		return fmt.Errorf("wal: encode: %w", err)
 	}
 
 	seq := w.seq + 1
-	if err := w.Append(Entry{
+	if err := w.appendLocked(Entry{
 		Seq:        seq,
 		Op:         OpSet,
 		Table:      tableName,
@@ -63,12 +70,15 @@ func (w *WAL) Set(ctx context.Context, tableName string, entity item.Entity) err
 		return fmt.Errorf("wal: append: %w", err)
 	}
 	w.seq = seq
-	return nil
+	return w.maybeAutoCheckpointLocked()
 }
 
 func (w *WAL) Delete(ctx context.Context, tableName string, key string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	seq := w.seq + 1
-	if err := w.Append(Entry{
+	if err := w.appendLocked(Entry{
 		Seq:   seq,
 		Op:    OpDel,
 		Table: tableName,
@@ -77,14 +87,31 @@ func (w *WAL) Delete(ctx context.Context, tableName string, key string) error {
 		return fmt.Errorf("db: wal append: %w", err)
 	}
 	w.seq = seq
-	return nil
-
+	return w.maybeAutoCheckpointLocked()
 }
 
+// Load recovers state by replaying the WAL into the given Operations targets.
+//
+// When CheckpointDir is set, it reads LastSeq from durable storage. A checkpoint means:
+// the durable store (typically fsdb on disk, possibly behind a WriteBatcher) must already
+// reflect every mutation with Entry.Seq <= LastSeq before LastSeq was saved. The WAL then
+// replays only entries with Seq > LastSeq onto the appropriate targets.
+//
+// With two targets (volatile + durable), the first receives a full replay from the start of
+// the WAL unless a table snapshot is present in the checkpoint file (see durable package);
+// in that case the first target is hydrated from the snapshot and both targets receive only
+// the tail (Seq > LastSeq). The last target always receives tail-only replay so on-disk
+// state is not double-applied.
+//
+// After successful recovery, when checkpoint is configured, Load calls Checkpoint() so
+// LastSeq on disk matches the highest Seq applied (and BeforeCheckpoint can flush batchers).
 func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error {
 	if len(operations) == 0 {
 		return errors.New("wal: load requires at least one operations")
 	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	decodeEntity := func(e Entry) (item.Entity, error) {
 		var it item.Entity
@@ -137,11 +164,18 @@ func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error
 	}
 
 	var lastSeq uint64
+	var tableBlobs map[string]map[string][]byte
 	if w.opts.CheckpointConfigured() {
 		var err error
-		lastSeq, err = durable.LoadLastSeq(w.opts.Checkpoint.Dir)
+		lastSeq, tableBlobs, err = w.opts.CheckpointStore.ReadCheckpointTables(w.opts.CheckpointDir)
 		if err != nil {
-			return fmt.Errorf("wal: load checkpoint seq: %w", err)
+			return fmt.Errorf("wal: load checkpoint: %w", err)
+		}
+	}
+	hasSnap := len(tableBlobs) > 0
+	if hasSnap {
+		if err := w.hydrateCheckpointIfNeeded(ctx, operations[0], tableBlobs); err != nil {
+			return err
 		}
 	}
 
@@ -153,24 +187,30 @@ func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error
 			return applyAll(operations, e)
 		})
 	default:
-		// Volatile stores (e.g. memdb) start empty: they need the full WAL. The durable tail
-		// (typically fsdb) only replays Seq > lastSeq — prefix is assumed on disk.
-		prefix := operations[:len(operations)-1]
-		tail := operations[len(operations)-1]
-		maxSeq, err = w.replaySince(0, func(e Entry) error {
-			return applyAll(prefix, e)
-		})
-		if err != nil {
-			return fmt.Errorf("db: replay wal (full): %w", err)
-		}
-		maxTail, errTail := w.replaySince(lastSeq, func(e Entry) error {
-			return applyEntry(tail, e)
-		})
-		if errTail != nil {
-			return fmt.Errorf("db: replay wal (tail): %w", errTail)
-		}
-		if maxTail > maxSeq {
-			maxSeq = maxTail
+		if hasSnap {
+			maxSeq, err = w.replaySince(lastSeq, func(e Entry) error {
+				return applyAll(operations, e)
+			})
+		} else {
+			// Volatile stores (e.g. memdb) start empty: they need the full WAL. The durable tail
+			// (typically fsdb) only replays Seq > lastSeq — prefix is assumed on disk.
+			prefix := operations[:len(operations)-1]
+			tail := operations[len(operations)-1]
+			maxSeq, err = w.replaySince(0, func(e Entry) error {
+				return applyAll(prefix, e)
+			})
+			if err != nil {
+				return fmt.Errorf("db: replay wal (full): %w", err)
+			}
+			maxTail, errTail := w.replaySince(lastSeq, func(e Entry) error {
+				return applyEntry(tail, e)
+			})
+			if errTail != nil {
+				return fmt.Errorf("db: replay wal (tail): %w", errTail)
+			}
+			if maxTail > maxSeq {
+				maxSeq = maxTail
+			}
 		}
 	}
 	if err != nil {
@@ -181,23 +221,49 @@ func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error
 	// Persist LastSeq after recovery so the next boot skips replayed prefix; the tail store
 	// was updated for Seq > lastSeq, and Seq <= lastSeq is assumed already materialized there.
 	if w.opts.CheckpointConfigured() {
-		if err := w.Checkpoint(); err != nil {
+		if err := w.checkpointLocked(); err != nil {
 			return fmt.Errorf("wal: post-load checkpoint: %w", err)
 		}
+		w.writesSinceCkpt = 0
+		w.bytesSinceCkpt = 0
 	}
 	return nil
 }
 
-// Checkpoint persists LastSeq to the configured checkpoint directory after flushing the WAL.
+func (w *WAL) hydrateCheckpointIfNeeded(ctx context.Context, first commands.Operations, blobs map[string]map[string][]byte) error {
+	if len(blobs) == 0 {
+		return nil
+	}
+	h, ok := first.(CheckpointBlobHydrator)
+	if !ok {
+		return fmt.Errorf("wal: checkpoint has table data but %T does not implement CheckpointBlobHydrator", first)
+	}
+	if err := h.ReplaceWithCheckpointBlobs(ctx, blobs); err != nil {
+		return fmt.Errorf("wal: apply checkpoint snapshot: %w", err)
+	}
+	return nil
+}
+
+// Checkpoint flushes the WAL, runs BeforeCheckpoint (so e.g. fsdb reflects all writes through
+// the current w.seq), then atomically persists LastSeq = w.seq.
+//
+// Ordering: durable on-disk state and BeforeCheckpoint completion must cover every Seq <= w.seq
+// before SaveLastSeq; otherwise recovery could skip WAL entries that were never materialized.
+// After SaveLastSeq, if TruncateAfterCheckpoint is set, the WAL file is truncated; new appends
+// continue with monotonically increasing Seq.
+//
 // Load invokes Checkpoint automatically when checkpoint is configured and replay succeeded.
-// When Options.BeforeCheckpoint is set (e.g. flush a deferred fsdb batcher), it runs after WAL
-// flush and before SaveLastSeq. For other callers: ensure durable store already reflects all
-// mutations through w.seq before calling when BeforeCheckpoint is nil.
 func (w *WAL) Checkpoint() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.checkpointLocked()
+}
+
+func (w *WAL) checkpointLocked() error {
 	if !w.opts.CheckpointConfigured() {
 		return errors.New("wal: checkpoint dir not configured")
 	}
-	if err := w.Flush(); err != nil {
+	if err := w.flushLocked(); err != nil {
 		return fmt.Errorf("wal: checkpoint flush: %w", err)
 	}
 	if w.opts.BeforeCheckpoint != nil {
@@ -205,10 +271,10 @@ func (w *WAL) Checkpoint() error {
 			return fmt.Errorf("wal: before checkpoint: %w", err)
 		}
 	}
-	if err := durable.SaveLastSeq(w.opts.Checkpoint.Dir, w.seq); err != nil {
+	if err := w.opts.CheckpointStore.SaveLastSeq(w.opts.CheckpointDir, w.seq); err != nil {
 		return fmt.Errorf("wal: checkpoint save seq: %w", err)
 	}
-	if w.opts.Checkpoint.TruncateAfterCheckpoint {
+	if w.opts.CheckpointPolicy.TruncateAfterCheckpoint {
 		if err := w.truncate(0); err != nil {
 			return fmt.Errorf("wal: checkpoint truncate: %w", err)
 		}
@@ -216,7 +282,26 @@ func (w *WAL) Checkpoint() error {
 			return err
 		}
 	}
+	w.writesSinceCkpt = 0
+	w.bytesSinceCkpt = 0
 	return nil
+}
+
+func (w *WAL) maybeAutoCheckpointLocked() error {
+	if !w.opts.CheckpointConfigured() {
+		return nil
+	}
+	trigger := false
+	if w.opts.CheckpointPolicy.EveryNWrites > 0 && w.writesSinceCkpt >= w.opts.CheckpointPolicy.EveryNWrites {
+		trigger = true
+	}
+	if w.opts.CheckpointPolicy.MaxWalBytes > 0 && w.bytesSinceCkpt >= w.opts.CheckpointPolicy.MaxWalBytes {
+		trigger = true
+	}
+	if !trigger {
+		return nil
+	}
+	return w.checkpointLocked()
 }
 
 func maxUint64(a, b uint64) uint64 {
@@ -252,8 +337,15 @@ func Open(path string, opts Options) (*WAL, error) {
 	return w, nil
 }
 
-// Append adds one frame to the
+// Append adds one frame to the log. The caller must not assume w.seq is updated; callers that
+// maintain sequence (e.g. Set) assign w.seq explicitly. Append counts toward automatic checkpoint thresholds.
 func (w *WAL) Append(e Entry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.appendLocked(e)
+}
+
+func (w *WAL) appendLocked(e Entry) error {
 	rec, err := e.MarshalBinary()
 	if err != nil {
 		return err
@@ -266,21 +358,33 @@ func (w *WAL) Append(e Entry) error {
 			if err := w.bufw.Flush(); err != nil {
 				return err
 			}
-			return w.syncAndHook()
+			if err := w.syncAndHook(); err != nil {
+				return err
+			}
 		}
-		return nil
+	} else {
+		if _, err := w.f.Write(rec); err != nil {
+			return err
+		}
+		if w.opts.Durability == SyncEveryWrite {
+			if err := w.syncAndHook(); err != nil {
+				return err
+			}
+		}
 	}
-	if _, err := w.f.Write(rec); err != nil {
-		return err
-	}
-	if w.opts.Durability == SyncEveryWrite {
-		return w.syncAndHook()
-	}
+	w.writesSinceCkpt++
+	w.bytesSinceCkpt += int64(len(rec))
 	return nil
 }
 
 // Flush flushes buffered WAL data and syncs to disk.
 func (w *WAL) Flush() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.flushLocked()
+}
+
+func (w *WAL) flushLocked() error {
 	if w.bufw != nil {
 		if err := w.bufw.Flush(); err != nil {
 			return err
@@ -293,6 +397,8 @@ func (w *WAL) Flush() error {
 // Incomplete trailing data is truncated so future appends succeed.
 // Returns the maximum Seq seen in the file.
 func (w *WAL) Replay(apply func(Entry) error) (maxSeq uint64, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	return w.replaySince(0, apply)
 }
 
@@ -421,6 +527,8 @@ func RepairTruncatesTail(path string) error {
 
 // Close flushes and closes the WAL file.
 func (w *WAL) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.bufw != nil {
 		if err := w.bufw.Flush(); err != nil {
 			_ = w.f.Close()

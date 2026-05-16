@@ -17,6 +17,7 @@ import (
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/commands"
 	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/durable"
 	"github.com/IsaacDSC/kvs/internal/fsdb"
 	"github.com/IsaacDSC/kvs/internal/memdb"
 	"github.com/IsaacDSC/kvs/internal/raft"
@@ -90,8 +91,9 @@ func main() {
 	defer batchedFS.Stop()
 
 	wal, err := wal.New(nodeFlags.WALPath, wal.Options{
-		Durability: wal.SyncEveryWrite,
-		Checkpoint: wal.CheckpointConfig{Dir: nodeFlags.CheckpointDefaultDir},
+		Durability:      wal.SyncEveryWrite,
+		CheckpointDir:   nodeFlags.CheckpointDefaultDir,
+		CheckpointStore: durable.NewFileCheckpointStore(),
 		BeforeCheckpoint: func(ckptCtx context.Context) error {
 			return batchedFS.Flush(ckptCtx)
 		},
