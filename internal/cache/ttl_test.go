@@ -45,15 +45,15 @@ func TestTTL_OnceMissAfterExpiry(t *testing.T) {
 	undo := patchNow(tc)
 	defer undo()
 
-	c := newCache(10, time.Minute)
+	c := New[int](10, time.Minute)
 
-	if _, err := c.Once("k", func() (any, error) { return 1, nil }); err != nil {
+	if _, err := c.Once("k", func() (int, error) { return 1, nil }); err != nil {
 		t.Fatal(err)
 	}
 
 	tc.Set(base.Add(time.Minute))
 	var ran bool
-	v, err := c.Once("k", func() (any, error) {
+	v, err := c.Once("k", func() (int, error) {
 		ran = true
 		return 2, nil
 	})
@@ -71,15 +71,15 @@ func TestTTL_HitExtendsDeadline(t *testing.T) {
 	undo := patchNow(tc)
 	defer undo()
 
-	c := newCache(10, time.Minute)
+	c := New[string](10, time.Minute)
 
-	if _, err := c.Once("k", func() (any, error) { return "x", nil }); err != nil {
+	if _, err := c.Once("k", func() (string, error) { return "x", nil }); err != nil {
 		t.Fatal(err)
 	}
 
 	tc.Set(base.Add(59 * time.Second))
-	if v, err := c.Once("k", func() (any, error) {
-		return nil, errors.New("fn must not run on cache hit")
+	if v, err := c.Once("k", func() (string, error) {
+		return "", errors.New("fn must not run on cache hit")
 	}); err != nil {
 		t.Fatal(err)
 	} else if v != "x" {
@@ -88,7 +88,7 @@ func TestTTL_HitExtendsDeadline(t *testing.T) {
 
 	tc.Set(base.Add(2 * time.Minute))
 	var ran bool
-	if _, err := c.Once("k", func() (any, error) {
+	if _, err := c.Once("k", func() (string, error) {
 		ran = true
 		return "y", nil
 	}); err != nil {
@@ -105,10 +105,10 @@ func TestTTL_PurgeExpired(t *testing.T) {
 	undo := patchNow(tc)
 	defer undo()
 
-	c := newCache(0, time.Minute)
+	c := New[int](0, time.Minute)
 
-	_, _ = c.Once("a", func() (any, error) { return 1, nil })
-	_, _ = c.Once("b", func() (any, error) { return 2, nil })
+	_, _ = c.Once("a", func() (int, error) { return 1, nil })
+	_, _ = c.Once("b", func() (int, error) { return 2, nil })
 
 	tc.Set(base.Add(time.Hour))
 	c.PurgeExpired()
@@ -116,7 +116,7 @@ func TestTTL_PurgeExpired(t *testing.T) {
 	tc.Set(base.Add(time.Hour))
 	var misses int
 	for _, key := range []string{"a", "b"} {
-		_, _ = c.Once(key, func() (any, error) {
+		_, _ = c.Once(key, func() (int, error) {
 			misses++
 			return 0, nil
 		})
@@ -132,10 +132,10 @@ func TestTTL_EvictionFreesSlotWhenTailExpired(t *testing.T) {
 	undo := patchNow(tc)
 	defer undo()
 
-	c := newCache(2, time.Minute)
+	c := New[int](2, time.Minute)
 
-	_, _ = c.Once("a", func() (any, error) { return 1, nil })
-	_, _ = c.Once("b", func() (any, error) { return 2, nil })
+	_, _ = c.Once("a", func() (int, error) { return 1, nil })
+	_, _ = c.Once("b", func() (int, error) { return 2, nil })
 
 	tc.Set(base.Add(time.Hour))
 	if err := c.SaveIfOk("c", 3, func() error { return nil }); err != nil {
@@ -143,11 +143,11 @@ func TestTTL_EvictionFreesSlotWhenTailExpired(t *testing.T) {
 	}
 
 	var sawA, sawC int
-	_, _ = c.Once("a", func() (any, error) {
+	_, _ = c.Once("a", func() (int, error) {
 		sawA++
 		return 0, nil
 	})
-	_, _ = c.Once("c", func() (any, error) {
+	_, _ = c.Once("c", func() (int, error) {
 		sawC++
 		return 0, nil
 	})
@@ -162,8 +162,8 @@ func TestTTL_StartCleanupLoop(t *testing.T) {
 	undo := patchNow(tc)
 	defer undo()
 
-	c := newCache(0, time.Minute)
-	_, _ = c.Once("z", func() (any, error) { return 1, nil })
+	c := New[int](0, time.Minute)
+	_, _ = c.Once("z", func() (int, error) { return 1, nil })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.StartCleanupLoop(ctx, 5*time.Millisecond)
@@ -174,7 +174,7 @@ func TestTTL_StartCleanupLoop(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	var miss bool
-	_, _ = c.Once("z", func() (any, error) {
+	_, _ = c.Once("z", func() (int, error) {
 		miss = true
 		return 2, nil
 	})

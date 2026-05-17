@@ -11,6 +11,7 @@ import (
 
 // Config holds memdb, WAL checkpoint, and fsdb batcher settings (formerly CLI flags).
 type Config struct {
+	CacheTTL           time.Duration `env:"CACHE_TTL" env-default:"5m"`
 	CacheMaxEntries    int           `env:"CACHE_MAX_ENTRIES" env-default:"1000" env-description:"max entries per in-memory table (0=unlimited); LRU eviction applies when set"`
 	CheckpointInterval time.Duration `env:"CHECKPOINT_INTERVAL" env-default:"5m" env-description:"periodic WAL LastSeq metadata checkpoint (0 disables)"`
 	FSDeferWrites      bool          `env:"FS_DEFER_WRITES" env-default:"false" env-description:"batch coalesced writes to fsdb (LWW); use FS_FLUSH_INTERVAL and/or shutdown flush — see fsdb.WriteBatcher"`

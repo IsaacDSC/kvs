@@ -4,12 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
 	"github.com/IsaacDSC/kvs/internal/dto"
 	"github.com/IsaacDSC/kvs/internal/item"
 )
+
+type Cache[T item.Entity] interface {
+	Once(key string, fn func() (T, error)) (T, error)
+	DelIfOk(key string, fn func() error) error
+	SaveIfOk(key string, value T, fn func() error) error
+}
 
 type DB interface {
 	CreateTable(tableName string) error
@@ -30,14 +37,15 @@ type Adapter struct {
 	mu    sync.Mutex
 	store DB
 	logdb LogDb
+	cache Cache[item.Entity]
 }
 
-func New(store DB, logDb LogDb) *Adapter {
+func New(store DB, logDb LogDb, cache Cache[item.Entity]) *Adapter {
 	return &Adapter{
 		store: store,
 		logdb: logDb,
+		cache: cache,
 	}
-
 }
 
 func (f *Adapter) CreateTable(table string) error {
@@ -56,15 +64,18 @@ func (f *Adapter) Set(ctx context.Context, tableName string, it dto.Item) error 
 	if err := f.validateConsistency(ctx, tableName, it); err != nil {
 		return err
 	}
-
 	if err := f.logdb.Set(ctx, tableName, entity); err != nil {
 		return fmt.Errorf("db: wal set: %w", err)
 	}
 
-	if err := f.store.Set(ctx, tableName, entity); err != nil {
-		return fmt.Errorf("db: put entity: %w", err)
-	}
-	return nil
+	key := f.key(entity.Key)
+	return f.cache.SaveIfOk(key, entity, func() error {
+		if err := f.store.Set(ctx, tableName, entity); err != nil {
+			return fmt.Errorf("db: put entity: %w", err)
+		}
+
+		return nil
+	})
 }
 
 // Get reads a value from persistent storage (filesystem-backed store behind this adapter).
@@ -72,7 +83,10 @@ func (f *Adapter) Get(ctx context.Context, tableName string, key string) (item.E
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	return f.store.Get(ctx, tableName, key)
+	return f.cache.Once(f.key(key), func() (item.Entity, error) {
+		return f.store.Get(ctx, tableName, key)
+	})
+
 }
 
 func (f *Adapter) GetBySecondaryKey(ctx context.Context, tableName string, secondaryKey string) ([]item.Entity, error) {
@@ -80,6 +94,47 @@ func (f *Adapter) GetBySecondaryKey(ctx context.Context, tableName string, secon
 	defer f.mu.Unlock()
 
 	return f.store.GetBySk(ctx, tableName, secondaryKey)
+}
+
+// ApplyReplicated applies a committed Raft entry unconditionally on a follower.
+//
+// Unlike Set, this bypasses validateConsistency: optimistic-lock preconditions are
+// a client-side business rule that the leader already enforced before proposing to
+// Raft. Re-running that check on followers produces false positives — particularly
+// after a restart, when the Raft log (in-memory only) is re-delivered in full by the
+// leader while the WAL has already advanced the store to the final state.
+//
+// TODO: eliminate the catch-up replay entirely by persisting the Raft log so
+// lastApplied is correctly restored on restart (see raft.Node.log TODO comment).
+func (f *Adapter) ApplyReplicated(ctx context.Context, tableName string, it dto.Item) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	entity := it.Entity()
+	if err := f.logdb.Set(ctx, tableName, entity); err != nil {
+		return fmt.Errorf("db: wal set (replicated): %w", err)
+	}
+	if err := f.store.Set(ctx, tableName, entity); err != nil {
+		return fmt.Errorf("db: put entity (replicated): %w", err)
+	}
+	return nil
+}
+
+// ApplyReplicatedDelete applies a committed Raft delete unconditionally on a follower.
+// See ApplyReplicated for the rationale.
+func (f *Adapter) ApplyReplicatedDelete(ctx context.Context, tableName string, it dto.DeleteItem) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.logdb.Delete(ctx, tableName, it.Key); err != nil {
+		return fmt.Errorf("db: wal delete (replicated): %w", err)
+	}
+	return f.cache.DelIfOk(f.key(it.Key), func() error {
+		if err := f.store.Del(ctx, tableName, it.Key); err != nil {
+			return fmt.Errorf("db: delete entity (replicated): %w", err)
+		}
+		return nil
+	})
 }
 
 func (f *Adapter) Delete(ctx context.Context, tableName string, it dto.DeleteItem) error {
@@ -95,11 +150,13 @@ func (f *Adapter) Delete(ctx context.Context, tableName string, it dto.DeleteIte
 		return fmt.Errorf("db: wal delete: %w", err)
 	}
 
-	if err := f.store.Del(ctx, tableName, e.Key); err != nil {
-		return fmt.Errorf("db: delete entity: %w", err)
-	}
+	return f.cache.DelIfOk(f.key(it.Key), func() error {
+		if err := f.store.Del(ctx, tableName, e.Key); err != nil {
+			return fmt.Errorf("db: delete entity: %w", err)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 func (f *Adapter) Load(ctx context.Context) error {
@@ -144,4 +201,10 @@ func (f *Adapter) validateConsistency(ctx context.Context, tableName string, it 
 	}
 
 	return nil
+}
+
+func (f *Adapter) key(args ...string) string {
+	keys := []string{"kvs:adapter:cache:mem"}
+	keys = append(keys, args...)
+	return strings.Join(keys, ":")
 }

@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/IsaacDSC/kvs/internal/api"
+	"github.com/IsaacDSC/kvs/internal/cache"
 	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/commands"
 	"github.com/IsaacDSC/kvs/internal/db"
 	"github.com/IsaacDSC/kvs/internal/durable"
 	"github.com/IsaacDSC/kvs/internal/fsdb"
+	"github.com/IsaacDSC/kvs/internal/item"
 	"github.com/IsaacDSC/kvs/internal/raft"
 	"github.com/IsaacDSC/kvs/internal/raftpb"
 	"github.com/IsaacDSC/kvs/internal/tasks"
@@ -49,7 +51,7 @@ func main() {
 		panic(err)
 	}
 
-	nodeCfg := cfg.Get()
+	conf := cfg.Get()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -83,7 +85,7 @@ func main() {
 	// deferred state before post-recovery Checkpoint (LastSeq must not advance ahead of disk).
 	rawFS := fsdb.NewDb(nodeFlags.FsDefaultDir)
 	batchOpts := fsdb.WriteBatcherOptions{}
-	if nodeCfg.FSDeferWrites {
+	if conf.FSDeferWrites {
 		batchOpts.DeferWrites = true
 	}
 	batchedFS := fsdb.NewWriteBatcher(rawFS, batchOpts)
@@ -101,7 +103,8 @@ func main() {
 		panic(err)
 	}
 
-	database := db.New(batchedFS, wal)
+	cc := cache.New[item.Entity](conf.CacheMaxEntries, conf.CacheTTL)
+	database := db.New(batchedFS, wal, cc)
 	defer database.Close()
 
 	//  Read the WAL and apply the operations to the database
@@ -109,17 +112,18 @@ func main() {
 		panic(err)
 	}
 
-	if nodeCfg.CheckpointInterval > 0 {
-		go tasks.RunPeriodicWALCheckpoint(ctx, logger, wal, nodeCfg.CheckpointInterval)
+	if conf.CheckpointInterval > 0 {
+		go tasks.RunPeriodicWALCheckpoint(ctx, logger, wal, conf.CheckpointInterval)
 	}
-	if nodeCfg.FSDeferWrites && nodeCfg.FSFlushInterval > 0 {
+
+	if conf.FSDeferWrites && conf.FSFlushInterval > 0 {
 		maxKeys, maxBytes := batchedFS.DirtyFlushThresholds()
 		go tasks.RunPeriodicFSFlush(ctx, logger, batchedFS, tasks.FSPeriodicFlushLimits{
-			Interval:         nodeCfg.FSFlushInterval,
+			Interval:         conf.FSFlushInterval,
 			MaxPendingKeys:   maxKeys,
 			MaxPendingBytes:  maxBytes,
-			PendingPollEvery: nodeCfg.FSPeriodicPoll,
-			PerFlushTimeout:  nodeCfg.FSFlushOpTimeout,
+			PendingPollEvery: conf.FSPeriodicPoll,
+			PerFlushTimeout:  conf.FSFlushOpTimeout,
 		}, batchedFS)
 	}
 
@@ -175,7 +179,18 @@ func main() {
 		for {
 			select {
 			case entry := <-node.Applied():
-				logger.Info("applied entry", "command", entry.Data.Cmd, "term", entry.Term, "state", node.State())
+				var (
+					promoteVersion string = "EMPTY"
+					oldVersion     string = "EMPTY"
+				)
+
+				if entry.Data.Item.Version != nil {
+					promoteVersion = entry.Data.Item.Version.PromoteVersion
+					oldVersion = entry.Data.Item.Version.OldVersion
+				}
+
+				logger.Info("applied entry", "command", entry.Data.Cmd, "term", entry.Term, "state", node.State(), "data", entry.Data.Item,
+					"old_version", oldVersion, "promote_version", promoteVersion)
 
 				if node.State().Role == raft.Follower.String() {
 					switch entry.Data.Cmd {
@@ -185,13 +200,13 @@ func main() {
 							os.Exit(1)
 						}
 					case commands.SetCmd, commands.OptimisticSetCmd:
-						if err := database.Set(ctx, entry.Data.TableName, entry.Data.Item); err != nil {
-							logger.Error("failed to set item", "error", err)
+						if err := database.ApplyReplicated(ctx, entry.Data.TableName, entry.Data.Item); err != nil {
+							logger.Error("failed to apply replicated set", "error", err)
 							os.Exit(1)
 						}
 					case commands.DeleteCmd, commands.OptimisticDelCmd:
-						if err := database.Delete(ctx, entry.Data.TableName, entry.Data.Item.DelItem()); err != nil {
-							logger.Error("failed to delete item", "error", err)
+						if err := database.ApplyReplicatedDelete(ctx, entry.Data.TableName, entry.Data.Item.DelItem()); err != nil {
+							logger.Error("failed to apply replicated delete", "error", err)
 							os.Exit(1)
 						}
 

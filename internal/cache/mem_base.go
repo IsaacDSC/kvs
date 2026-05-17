@@ -12,7 +12,7 @@ import (
 // Cache is an in-memory LRU cache guarded by a mutex.
 // limitUnit is the maximum number of entries; values <= 0 disable capacity eviction.
 // ttl <= 0 disables time-based expiration.
-type Cache struct {
+type Cache[T any] struct {
 	mu        sync.Mutex
 	ll        *list.List
 	items     map[string]*list.Element // key -> list element
@@ -20,20 +20,16 @@ type Cache struct {
 	ttl       time.Duration
 }
 
-type kv struct {
+type kv[T any] struct {
 	key       string
-	value     any
+	value     T
 	expiresAt time.Time
 }
 
 // New returns an empty LRU cache. limitUnit is max capacity (<= 0 = unlimited).
 // ttl is the entry lifetime after last access or write (<= 0 = no TTL).
-func New(limitUnit int, ttl time.Duration) *Cache {
-	return newCache(limitUnit, ttl)
-}
-
-func newCache(limitUnit int, ttl time.Duration) *Cache {
-	return &Cache{
+func New[T any](limitUnit int, ttl time.Duration) *Cache[T] {
+	return &Cache[T]{
 		ll:        list.New(),
 		items:     make(map[string]*list.Element),
 		limitUnit: limitUnit,
@@ -42,7 +38,7 @@ func newCache(limitUnit int, ttl time.Duration) *Cache {
 }
 
 // PurgeExpired deletes all expired entries. With no TTL configured, it is a no-op.
-func (c *Cache) PurgeExpired() {
+func (c *Cache[T]) PurgeExpired() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -52,7 +48,7 @@ func (c *Cache) PurgeExpired() {
 
 	for e := c.ll.Front(); e != nil; {
 		next := e.Next()
-		ent := e.Value.(*kv)
+		ent := e.Value.(*kv[T])
 		if c.expired(ent) {
 			delete(c.items, ent.key)
 			c.ll.Remove(e)
@@ -63,7 +59,7 @@ func (c *Cache) PurgeExpired() {
 
 // StartCleanupLoop runs PurgeExpired every interval until ctx is canceled.
 // interval <= 0 defaults to one second.
-func (c *Cache) StartCleanupLoop(ctx context.Context, interval time.Duration) {
+func (c *Cache[T]) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Second
 	}
@@ -82,7 +78,7 @@ func (c *Cache) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 }
 
 // SaveIfOk locks the cache, runs fn, and if fn succeeds stores value for key as MRU.
-func (c *Cache) SaveIfOk(key string, value any, fn func() error) error {
+func (c *Cache[T]) SaveIfOk(key string, value T, fn func() error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -98,14 +94,14 @@ func (c *Cache) SaveIfOk(key string, value any, fn func() error) error {
 
 // Once returns the cached value for key and promotes it to MRU. If missing,
 // runs fn and stores the result (with eviction when applicable).
-func (c *Cache) Once(key string, fn func() (any, error)) (any, error) {
+func (c *Cache[T]) Once(key string, fn func() (T, error)) (T, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.maybeSweepExpiredTail()
 
 	if elem, ok := c.items[key]; ok {
-		ent := elem.Value.(*kv)
+		ent := elem.Value.(*kv[T])
 		if c.expired(ent) {
 			c.removeElement(elem)
 		} else {
@@ -117,28 +113,46 @@ func (c *Cache) Once(key string, fn func() (any, error)) (any, error) {
 
 	v, err := fn()
 	if err != nil {
-		return nil, err
+		var zero T
+		return zero, err
 	}
 
 	c.set(key, v)
 	return v, nil
 }
 
-func (c *Cache) expired(ent *kv) bool {
+// DelIfOk runs fn while holding the lock; on success it evicts key from the cache.
+// On failure it returns the error and leaves the cache unchanged.
+func (c *Cache[T]) DelIfOk(key string, fn func() error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.maybeSweepExpiredTail()
+
+	if err := fn(); err != nil {
+		return err
+	}
+	if elem, ok := c.items[key]; ok {
+		c.removeElement(elem)
+	}
+	return nil
+}
+
+func (c *Cache[T]) expired(ent *kv[T]) bool {
 	if c.ttl <= 0 {
 		return false
 	}
 	return !datetime.Now().Before(ent.expiresAt)
 }
 
-func (c *Cache) touch(ent *kv) {
+func (c *Cache[T]) touch(ent *kv[T]) {
 	if c.ttl <= 0 {
 		return
 	}
 	ent.expiresAt = datetime.Now().Add(c.ttl)
 }
 
-func (c *Cache) maybeSweepExpiredTail() {
+func (c *Cache[T]) maybeSweepExpiredTail() {
 	if c.ttl <= 0 {
 		return
 	}
@@ -147,7 +161,7 @@ func (c *Cache) maybeSweepExpiredTail() {
 		if back == nil {
 			return
 		}
-		ent := back.Value.(*kv)
+		ent := back.Value.(*kv[T])
 		if !c.expired(ent) {
 			return
 		}
@@ -155,16 +169,16 @@ func (c *Cache) maybeSweepExpiredTail() {
 	}
 }
 
-func (c *Cache) removeElement(elem *list.Element) {
-	ent := elem.Value.(*kv)
+func (c *Cache[T]) removeElement(elem *list.Element) {
+	ent := elem.Value.(*kv[T])
 	delete(c.items, ent.key)
 	c.ll.Remove(elem)
 }
 
 // set stores key as MRU; for a new key, drops expired tail entries then LRU if at capacity.
-func (c *Cache) set(key string, value any) {
+func (c *Cache[T]) set(key string, value T) {
 	if elem, ok := c.items[key]; ok {
-		ent := elem.Value.(*kv)
+		ent := elem.Value.(*kv[T])
 		ent.value = value
 		c.touch(ent)
 		c.ll.MoveToFront(elem)
@@ -177,17 +191,17 @@ func (c *Cache) set(key string, value any) {
 		c.evictLRU()
 	}
 
-	ent := &kv{key: key, value: value}
+	ent := &kv[T]{key: key, value: value}
 	c.touch(ent)
 	c.items[key] = c.ll.PushFront(ent)
 }
 
-func (c *Cache) evictLRU() {
+func (c *Cache[T]) evictLRU() {
 	back := c.ll.Back()
 	if back == nil {
 		return
 	}
-	k := back.Value.(*kv).key
+	k := back.Value.(*kv[T]).key
 	delete(c.items, k)
 	c.ll.Remove(back)
 }
