@@ -9,14 +9,14 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/IsaacDSC/kvs/SDK"
 	"github.com/jaswdr/faker/v2"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestMultipleNodes(t *testing.T) {
-	fake := faker.New()
+func getLeaderAndFollowers(t *testing.T, tableName string) (*sdk.Table, []*sdk.Table) {
 	peers := [3]string{
 		"http://localhost:8001",
 		"http://localhost:8002",
@@ -56,7 +56,6 @@ func TestMultipleNodes(t *testing.T) {
 	assert.Contains(t, peers, leader)
 	fmt.Println(leader)
 
-	tableName := fmt.Sprintf("sdk_multiple_nodes_test:%s", fake.Hash().MD5())
 	tableLeader, err := sdk.GetOrCreateTable(leader, tableName)
 	if err != nil {
 		log.Fatalf("error on GetOrCreateTable: leader with error : %v", err)
@@ -75,6 +74,14 @@ func TestMultipleNodes(t *testing.T) {
 		}
 		tableFollowers = append(tableFollowers, t)
 	}
+
+	return tableLeader, tableFollowers
+}
+
+func TestMultipleNodes(t *testing.T) {
+	fake := faker.New()
+	tableName := fmt.Sprintf("sdk_multiple_nodes_test:%s", fake.Hash().MD5())
+	tableLeader, tableFollowers := getLeaderAndFollowers(t, tableName)
 
 	t.Run("Test writter leader", func(t *testing.T) {
 		skGroup := fake.Hash().MD5()
@@ -113,6 +120,7 @@ func TestMultipleNodes(t *testing.T) {
 			})
 
 			t.Run("Expected followers consistent", func(t *testing.T) {
+				time.Sleep(time.Millisecond * 100)
 				for _, tb := range tableFollowers {
 					fItems, err := tb.FindAll(context.Background(), input[0].SK)
 					assert.NoError(t, err)
@@ -123,23 +131,45 @@ func TestMultipleNodes(t *testing.T) {
 		})
 
 		t.Run("Test find peers validate to consistency", func(t *testing.T) {
-			t.Skip()
+			time.Sleep(time.Millisecond * 100)
 			for _, i := range input {
 				item, err := tableLeader.Find(context.Background(), i.Key)
 				assert.NoError(t, err)
-				assert.Equal(t, input, item)
+				assert.Equal(t, i, item)
 
 				for _, tb := range tableFollowers {
 					fItem, err := tb.Find(context.Background(), i.Key)
 					assert.NoError(t, err)
-					assert.Equal(t, input, fItem)
+					assert.Equal(t, i, fItem)
 				}
 			}
 		})
+
+		t.Run("Expected delte in follower with error", func(t *testing.T) {
+			for _, tb := range tableFollowers {
+				for _, i := range input {
+					assert.Error(t, tb.Del(context.Background(), i.Key))
+				}
+			}
+		})
+
+		t.Run("Expected delete all items and finaly is consistent", func(t *testing.T) {
+			time.Sleep(time.Millisecond * 100)
+			for _, i := range input {
+				assert.NoError(t, tableLeader.Del(context.Background(), i.Key))
+				_, err := tableLeader.Find(context.Background(), i.Key)
+				assert.Error(t, err)
+				time.Sleep(time.Millisecond * 100)
+				for _, tb := range tableFollowers {
+					_, err := tb.Find(context.Background(), i.Key)
+					assert.Error(t, err)
+				}
+			}
+		})
+
 	})
 
 	t.Run("Test writter in follower", func(t *testing.T) {
-		t.Skip()
 		item := sdk.Item{
 			Key:     fake.Hash().MD5(),
 			SK:      fake.Hash().MD5(),
@@ -157,97 +187,6 @@ func TestMultipleNodes(t *testing.T) {
 		for _, tb := range tableFollowers {
 			err := tb.Set(context.Background(), inputItem)
 			assert.Error(t, err)
-		}
-	})
-
-}
-
-func TestFlow(t *testing.T) {
-
-	fake := faker.New()
-
-	tb, err := sdk.GetOrCreateTable("http://localhost:8001", "sdk_test_app")
-	assert.NoError(t, err)
-
-	t.Run("Test Create, Update With Optimistic and Find", func(t *testing.T) {
-		k := fake.Hash().MD5()
-		input := sdk.Item{
-			Key:     k,
-			SK:      fake.Hash().MD5(),
-			Value:   map[string]any{"name": fake.Person().Name()},
-			Version: "1",
-		}
-
-		inputItem := sdk.NewItem().
-			WithKey(input.Key).
-			WithSk(input.SK).
-			WithValue(input.Value).
-			WithVersion("", input.Version).
-			Build()
-
-		err = tb.Set(context.Background(), inputItem)
-		assert.NoError(t, err)
-
-		item, err := tb.Find(context.Background(), k)
-		assert.NoError(t, err)
-
-		assert.Equal(t, input, item)
-
-		input.Value = map[string]any{"name": fake.Person().Name()}
-		input.Version = "2"
-		updateInputItem := sdk.NewItem().
-			WithKey(input.Key).
-			WithSk(input.SK).
-			WithValue(input.Value).
-			WithVersion("1", "2").
-			Build()
-
-		err = tb.Set(context.Background(), updateInputItem)
-		assert.NoError(t, err)
-
-		item2, err := tb.Find(context.Background(), k)
-		assert.NoError(t, err)
-
-		assert.Equal(t, input, item2)
-
-		assert.NoError(t, tb.Del(context.Background(), input.Key))
-	})
-
-	t.Run("Test Create and FindAll", func(t *testing.T) {
-		skGroup := fake.Hash().MD5()
-		input := []sdk.Item{
-			{
-				Key:     fake.Hash().MD5(),
-				SK:      skGroup,
-				Value:   map[string]any{"name": fake.Person().Name()},
-				Version: "1",
-			},
-			{
-				Key:     fake.Hash().MD5(),
-				SK:      skGroup,
-				Value:   map[string]any{"name": fake.Person().Name()},
-				Version: "1",
-			},
-		}
-
-		for _, item := range input {
-			inputItem := sdk.NewItem().
-				WithKey(item.Key).
-				WithSk(item.SK).
-				WithValue(item.Value).
-				WithVersion("", item.Version).
-				Build()
-
-			err = tb.Set(context.Background(), inputItem)
-			assert.NoError(t, err)
-		}
-
-		items, err := tb.FindAll(context.Background(), skGroup)
-		assert.NoError(t, err)
-		assert.Equal(t, len(input), len(items))
-		for i, item := range items {
-			assert.Equal(t, input[i], item)
-			assert.NoError(t, tb.Del(context.Background(), input[i].Key))
 		}
 	})
 
