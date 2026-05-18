@@ -15,7 +15,6 @@ import (
 	"github.com/IsaacDSC/kvs/internal/api"
 	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/IsaacDSC/kvs/internal/code"
-	"github.com/IsaacDSC/kvs/internal/commands"
 	"github.com/IsaacDSC/kvs/internal/raft"
 	"github.com/IsaacDSC/kvs/internal/raftpb"
 	"github.com/IsaacDSC/kvs/pkg/www"
@@ -127,34 +126,7 @@ func main() {
 	// ── Raft state machine + applied-entry loop ───────────────────────────────
 	go raftNode.Run(ctx)
 
-	raftNode.RunAppliedLoop(ctx, func(ctx context.Context, entry raft.LogEntry) error {
-		promoteVersion, oldVersion := "EMPTY", "EMPTY"
-		if entry.Data.Item.Version != nil {
-			promoteVersion = entry.Data.Item.Version.PromoteVersion
-			oldVersion = entry.Data.Item.Version.OldVersion
-		}
-		logger.Info("applied entry",
-			"command", entry.Data.Cmd,
-			"term", entry.Term,
-			"raft_index", raftNode.NextIndex(),
-			"state", raftNode.State(),
-			"old_version", oldVersion,
-			"promote_version", promoteVersion,
-		)
-
-		if raftNode.State().Role != raft.Follower.String() {
-			return nil
-		}
-		switch entry.Data.Cmd {
-		case commands.CreateTableCmd:
-			return database.CreateTable(entry.Data.TableName)
-		case commands.SetCmd, commands.OptimisticSetCmd:
-			return database.ApplyReplicated(ctx, entry.Data.TableName, entry.Data.Item)
-		case commands.DeleteCmd, commands.OptimisticDelCmd:
-			return database.ApplyReplicatedDelete(ctx, entry.Data.TableName, entry.Data.Item.DelItem())
-		}
-		return nil
-	}, func(err error) {
+	raftNode.RunAppliedLoop(ctx, api.GrpcHandle(logger, database, raftNode), func(err error) {
 		logger.Error("applied-entry loop fatal error", "error", err)
 		os.Exit(1)
 	})

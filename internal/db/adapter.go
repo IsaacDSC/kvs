@@ -114,10 +114,16 @@ func (f *Adapter) ApplyReplicated(ctx context.Context, tableName string, it dto.
 	if err := f.logdb.Set(ctx, tableName, entity); err != nil {
 		return fmt.Errorf("db: wal set (replicated): %w", err)
 	}
-	if err := f.store.Set(ctx, tableName, entity); err != nil {
-		return fmt.Errorf("db: put entity (replicated): %w", err)
-	}
-	return nil
+
+	key := f.key(entity.Key)
+	return f.cache.SaveIfOk(key, entity, func() error {
+		if err := f.store.Set(ctx, tableName, entity); err != nil {
+			return fmt.Errorf("db: put entity: %w", err)
+		}
+
+		return nil
+	})
+
 }
 
 // ApplyReplicatedDelete applies a committed Raft delete unconditionally on a follower.

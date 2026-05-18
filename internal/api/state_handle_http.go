@@ -15,6 +15,7 @@ type StateNode interface {
 type NodeStateResponse struct {
 	ID          string `json:"id"`
 	Role        string `json:"role"`
+	LeaderID    string `json:"leader_id,omitempty"`
 	Term        int    `json:"term"`
 	CommitIndex int    `json:"commitIndex"`
 	LogLen      int    `json:"logLen"`
@@ -24,6 +25,7 @@ func NewNodeStateResponse(state node.State) NodeStateResponse {
 	return NodeStateResponse{
 		ID:          state.ID,
 		Role:        state.Role,
+		LeaderID:    state.LeaderID,
 		Term:        state.Term,
 		CommitIndex: state.CommitIndex,
 		LogLen:      state.LogLen,

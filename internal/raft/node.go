@@ -33,8 +33,9 @@ type Node struct {
 
 	// Volatile state
 	state       State
-	commitIndex int // index of highest log entry known to be committed (-1 = none)
-	lastApplied int // index of highest log entry applied to state machine
+	leaderID    string // ID of the current known leader ("" when unknown)
+	commitIndex int    // index of highest log entry known to be committed (-1 = none)
+	lastApplied int    // index of highest log entry applied to state machine
 
 	// Leader-only volatile state (reset on each election win)
 	nextIndex  map[string]int // next log index to send to each peer
@@ -47,6 +48,16 @@ type Node struct {
 
 	// applied receives committed entries so the caller can run a state machine.
 	applied chan LogEntry
+
+	// commitNotify is a buffered-1 channel that wakes up the delivery goroutine
+	// whenever commitIndex advances. Using a separate goroutine for delivery
+	// allows blocking channel sends without holding n.mu, eliminating silent drops.
+	commitNotify chan struct{}
+
+	// onMetaPersist, when non-nil, is called (outside n.mu) whenever currentTerm
+	// or votedFor changes. Implementations should persist these fields to stable
+	// storage so they survive restarts (Raft §5.1/§5.2).
+	onMetaPersist func(term int, votedFor string)
 
 	logger *slog.Logger
 }
@@ -62,6 +73,7 @@ func NewNode(id string, peers []string, transport *Transport, logger *slog.Logge
 		transport:     transport,
 		resetElection: make(chan struct{}, 1),
 		applied:       make(chan LogEntry, 128),
+		commitNotify:  make(chan struct{}, 1),
 		logger:        logger,
 	}
 }
@@ -95,6 +107,7 @@ func NewNodeWithState(id string, peers []string, transport *Transport, logger *s
 		transport:     transport,
 		resetElection: make(chan struct{}, 1),
 		applied:       make(chan LogEntry, 128),
+		commitNotify:  make(chan struct{}, 1),
 		logger:        logger,
 	}
 }
@@ -123,6 +136,7 @@ func (n *Node) HandleRequestVote(args RequestVoteArgs, reply *RequestVoteReply) 
 		reply.VoteGranted = true
 		n.signalReset()
 		n.logger.Info("voted for", "candidate", args.CandidateID, "term", args.Term)
+		n.notifyMetaChange()
 	}
 }
 
@@ -142,6 +156,9 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs, reply *AppendEntriesR
 		// Same term: ensure we step down if we thought we were a candidate.
 		n.state = Follower
 	}
+
+	// Track the current leader so followers can surface it to clients.
+	n.leaderID = args.LeaderID
 
 	n.signalReset()
 	reply.Term = n.currentTerm
@@ -176,13 +193,12 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs, reply *AppendEntriesR
 		if lastIdx := len(n.log) - 1; lastIdx < newCommit {
 			newCommit = lastIdx
 		}
-		for i := n.commitIndex + 1; i <= newCommit; i++ {
-			select {
-			case n.applied <- n.log[i]:
-			default:
-			}
-		}
 		n.commitIndex = newCommit
+		// Wake up the delivery goroutine (non-blocking; one pending signal is enough).
+		select {
+		case n.commitNotify <- struct{}{}:
+		default:
+		}
 	}
 
 	reply.Success = true
@@ -194,8 +210,10 @@ func (n *Node) ProposeCommand(command commands.Data) error {
 	defer n.mu.Unlock()
 
 	if n.state != Leader {
-		// TODO: retornar o leader ID e host para o cliente
-		return fmt.Errorf("not the leader (current state: %s)", n.state)
+		if n.leaderID != "" {
+			return fmt.Errorf("not the leader: send your request to leader=%s (current state: %s)", n.leaderID, n.state)
+		}
+		return fmt.Errorf("not the leader: no leader known yet (current state: %s)", n.state)
 	}
 
 	n.log = append(n.log, LogEntry{Term: n.currentTerm, Data: command})
@@ -220,16 +238,30 @@ func (n *Node) Propose(command string) error {
 }
 
 func (n *Node) State() node.State {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	return node.State{
 		ID:          n.id,
 		Role:        n.state.String(),
+		LeaderID:    n.leaderID,
 		Term:        n.currentTerm,
 		CommitIndex: n.commitIndex,
 		LogLen:      len(n.log),
 	}
 }
 
+// SetMetaPersister registers a callback that is invoked (outside n.mu) whenever
+// currentTerm or votedFor changes. The callback should durably persist these
+// values so they survive restarts (Raft §5.1/§5.2). It must be set before Run.
+func (n *Node) SetMetaPersister(fn func(term int, votedFor string)) {
+	n.onMetaPersist = fn
+}
+
 func (n *Node) Run(ctx context.Context) {
+	// runDelivery forwards committed log entries to the applied channel without
+	// holding n.mu, so sends are blocking and no entry is ever silently dropped.
+	go n.runDelivery(ctx)
+
 	for {
 		n.mu.Lock()
 		state := n.state
@@ -246,6 +278,36 @@ func (n *Node) Run(ctx context.Context) {
 
 		if ctx.Err() != nil {
 			return
+		}
+	}
+}
+
+// runDelivery forwards committed log entries (lastApplied+1 … commitIndex) to
+// the applied channel. It runs independently of n.mu so that channel sends are
+// blocking: if the consumer is slow we apply backpressure instead of dropping.
+func (n *Node) runDelivery(ctx context.Context) {
+	for {
+		select {
+		case <-n.commitNotify:
+		case <-ctx.Done():
+			return
+		}
+
+		for {
+			n.mu.Lock()
+			if n.lastApplied >= n.commitIndex {
+				n.mu.Unlock()
+				break
+			}
+			n.lastApplied++
+			entry := n.log[n.lastApplied]
+			n.mu.Unlock()
+
+			select {
+			case n.applied <- entry:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
@@ -295,9 +357,11 @@ func (n *Node) runCandidate(ctx context.Context) {
 	n.mu.Lock()
 	n.currentTerm++
 	n.votedFor = n.id
+	n.leaderID = "" // campaigning: leader unknown
 	term := n.currentTerm
 	lastLogIndex, lastLogTerm := n.lastLogInfo()
 	n.logger.Info("became candidate", "term", term)
+	n.notifyMetaChange() // persists currentTerm++ and votedFor=self; releases+re-acquires mu
 	n.mu.Unlock()
 
 	votes := 1 // vote for self
@@ -379,6 +443,7 @@ func (n *Node) runLeader(ctx context.Context) {
 		n.nextIndex[peer] = len(n.log)
 		n.matchIndex[peer] = -1
 	}
+	n.leaderID = n.id // we are the leader
 	term := n.currentTerm
 	n.logger.Info("became leader", "term", term)
 	n.mu.Unlock()
@@ -483,15 +548,12 @@ func (n *Node) maybeAdvanceCommit(term int) {
 			}
 		}
 		if count >= n.quorum() {
-			for i := n.commitIndex + 1; i <= idx; i++ {
-				select {
-				case n.applied <- n.log[i]:
-				default:
-					// Applied channel full; drop rather than deadlock.
-					// In production this would be handled with back-pressure.
-				}
-			}
 			n.commitIndex = idx
+			// Wake up the delivery goroutine (non-blocking; one pending signal is enough).
+			select {
+			case n.commitNotify <- struct{}{}:
+			default:
+			}
 			n.logger.Info("committed", "index", idx, "term", term)
 			break
 		}
@@ -519,6 +581,21 @@ func (n *Node) stepDown(term int) {
 	n.currentTerm = term
 	n.state = Follower
 	n.votedFor = ""
+	n.leaderID = "" // new term → unknown leader until we receive AppendEntries
+	n.notifyMetaChange()
+}
+
+// notifyMetaChange calls onMetaPersist outside n.mu if it is set.
+// It captures the values while n.mu is held, then releases before calling.
+// Callers must hold n.mu; the lock is re-acquired before returning.
+func (n *Node) notifyMetaChange() {
+	if n.onMetaPersist == nil {
+		return
+	}
+	term, voted := n.currentTerm, n.votedFor
+	n.mu.Unlock()
+	n.onMetaPersist(term, voted)
+	n.mu.Lock()
 }
 
 // signalReset notifies the election timer to reset (non-blocking).
