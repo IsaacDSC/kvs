@@ -22,10 +22,12 @@ const (
 type Op byte
 
 const (
-	OpSet    Op = 1 // insert/overwrite value
-	OpDel    Op = 2 // remove key
-	OpBegin  Op = 3 // start transaction (ValueBytes = 8-byte txid BE)
-	OpCommit Op = 4 // commit transaction (ValueBytes = 8-byte txid BE)
+	OpSet     Op = 1 // insert/overwrite value
+	OpDel     Op = 2 // remove key
+	OpBegin   Op = 3 // start transaction (ValueBytes = 8-byte txid BE)
+	OpCommit  Op = 4 // commit transaction (ValueBytes = 8-byte txid BE)
+	OpRaftLog Op = 5 // committed Raft log entry (ValueBytes = CBOR raftLogPayload)
+	OpRaftMeta Op = 6 // Raft stable state: currentTerm + votedFor (ValueBytes = CBOR raftMetaPayload)
 )
 
 // Entry is one logical record in the WAL.
@@ -90,7 +92,7 @@ func (e *Entry) MarshalBinary() ([]byte, error) {
 	payload = appendString(payload, e.Key)
 	payload = appendString(payload, e.Fk)
 	switch e.Op {
-	case OpSet:
+	case OpSet, OpRaftLog, OpRaftMeta:
 		payload = appendU32(payload, uint32(len(e.ValueBytes)))
 		payload = append(payload, e.ValueBytes...)
 	case OpDel:
@@ -186,7 +188,8 @@ func (e *Entry) UnmarshalBinary(data []byte) error {
 	e.ValueBytes = append([]byte(nil), payload[off:off+int(vlen)]...)
 
 	switch e.Op {
-	case OpSet:
+	case OpSet, OpRaftLog, OpRaftMeta:
+		// variable-length ValueBytes; any length is valid
 	case OpDel:
 		if len(e.ValueBytes) != 0 {
 			return ErrCorruptRecord

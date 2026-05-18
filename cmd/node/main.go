@@ -13,33 +13,22 @@ import (
 	"time"
 
 	"github.com/IsaacDSC/kvs/internal/api"
-	"github.com/IsaacDSC/kvs/internal/cache"
 	"github.com/IsaacDSC/kvs/internal/cfg"
 	"github.com/IsaacDSC/kvs/internal/code"
 	"github.com/IsaacDSC/kvs/internal/commands"
-	"github.com/IsaacDSC/kvs/internal/db"
-	"github.com/IsaacDSC/kvs/internal/durable"
-	"github.com/IsaacDSC/kvs/internal/fsdb"
-	"github.com/IsaacDSC/kvs/internal/item"
 	"github.com/IsaacDSC/kvs/internal/raft"
 	"github.com/IsaacDSC/kvs/internal/raftpb"
-	"github.com/IsaacDSC/kvs/internal/tasks"
-	"github.com/IsaacDSC/kvs/internal/wal"
 	"github.com/IsaacDSC/kvs/pkg/www"
 	"google.golang.org/grpc"
-)
 
-const defaultDir = "tmp"
+	"github.com/IsaacDSC/kvs/cmd/node/setup"
+)
 
 // Cluster de 3 nós (um terminal por comando; espelha make run1 / run2 / run3):
 //
 //	go run ./cmd/node/main.go -id node1 -grpc-addr :9001 -http-addr :8001 -peers localhost:9002,localhost:9003
 //	go run ./cmd/node/main.go -id node2 -grpc-addr :9002 -http-addr :8002 -peers localhost:9001,localhost:9003
 //	go run ./cmd/node/main.go -id node3 -grpc-addr :9003 -http-addr :8003 -peers localhost:9001,localhost:9002
-//
-// Checkpoint WAL (LastSeq) periódico: ver CHECKPOINT_INTERVAL em .env / env (default 5m; 0 desliga).
-// Flush do batcher fsdb: FS_FLUSH_INTERVAL; FS_PERIODIC_POLL_INTERVAL (gatilho por tamanho, min 100ms); FS_FLUSH_OP_TIMEOUT (min 1s).
-// Estado KV: apenas WAL + fsdb (persistência em disco sob -fs-default-dir).
 func main() {
 	nodeFlags, err := cfg.ParseNodeFlags(flag.CommandLine, os.Args[1:])
 	if err != nil {
@@ -50,93 +39,60 @@ func main() {
 	if err := cfg.Load(); err != nil {
 		panic(err)
 	}
-
 	conf := cfg.Get()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})).With("node", nodeFlags.ID)
 
-	logger.Info("starting node", "id", nodeFlags.ID, "addrs", nodeFlags.HTTPAddr, "peers", nodeFlags.Peers, "fsdb", nodeFlags.FsDefaultDir)
-
 	clusterMode := "multi-node"
 	if len(nodeFlags.Peers) == 0 {
 		clusterMode = "single-node"
 	}
-
-	transport := raft.NewTransport()
-	node := raft.NewNode(nodeFlags.ID, nodeFlags.Peers, transport, logger)
+	logger.Info("starting node",
+		"id", nodeFlags.ID,
+		"http", nodeFlags.HTTPAddr,
+		"grpc", nodeFlags.GRPCAddr,
+		"peers", nodeFlags.Peers,
+		"cluster", clusterMode,
+		"fsdb", nodeFlags.FsDefaultDir,
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := os.MkdirAll(filepath.Dir(nodeFlags.WALPath), 0o755); err != nil {
-		logger.Error("failed to create wal parent dir", "error", err)
-		os.Exit(1)
-	}
-	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
-		logger.Error("failed to create data dir", "error", err)
-		os.Exit(1)
-	}
-
 	codec := code.NewCBOR()
 
-	// Filesystem writes go through WriteBatcher before WAL construction so Load can flush
-	// deferred state before post-recovery Checkpoint (LastSeq must not advance ahead of disk).
-	rawFS := fsdb.NewDb(nodeFlags.FsDefaultDir)
-	batchOpts := fsdb.WriteBatcherOptions{}
-	if conf.FSDeferWrites {
-		batchOpts.DeferWrites = true
-	}
-	batchedFS := fsdb.NewWriteBatcher(rawFS, batchOpts)
-	defer batchedFS.Stop()
+	// ── Raft ─────────────────────────────────────────────────────────────────
+	transport := raft.NewTransport()
+	defer transport.Close()
 
-	wal, err := wal.New(nodeFlags.WALPath, wal.Options{
-		Durability:      wal.SyncEveryWrite,
-		CheckpointDir:   nodeFlags.CheckpointDefaultDir,
-		CheckpointStore: durable.NewFileCheckpointStore(),
-		BeforeCheckpoint: func(ckptCtx context.Context) error {
-			return batchedFS.Flush(ckptCtx)
-		},
-	}, codec)
+	raftNode, err := setup.OpenRaft(filepath.Dir(nodeFlags.WALPath), nodeFlags.ID, nodeFlags.Peers, transport, logger, codec)
 	if err != nil {
-		panic(err)
+		logger.Error("failed to open raft node", "error", err)
+		os.Exit(1)
 	}
+	defer raftNode.Close()
 
-	cc := cache.New[item.Entity](conf.CacheMaxEntries, conf.CacheTTL)
-	database := db.New(batchedFS, wal, cc)
-	defer database.Close()
-
-	//  Read the WAL and apply the operations to the database
-	if err := database.Load(ctx); err != nil {
-		panic(err)
+	// ── KV database ───────────────────────────────────────────────────────────
+	kvStore, err := setup.OpenKV(ctx, nodeFlags, conf, codec, logger)
+	if err != nil {
+		logger.Error("failed to open kv store", "error", err)
+		os.Exit(1)
 	}
+	defer kvStore.Close()
 
-	if conf.CheckpointInterval > 0 {
-		go tasks.RunPeriodicWALCheckpoint(ctx, logger, wal, conf.CheckpointInterval)
-	}
+	database := kvStore.DB()
 
-	if conf.FSDeferWrites && conf.FSFlushInterval > 0 {
-		maxKeys, maxBytes := batchedFS.DirtyFlushThresholds()
-		go tasks.RunPeriodicFSFlush(ctx, logger, batchedFS, tasks.FSPeriodicFlushLimits{
-			Interval:         conf.FSFlushInterval,
-			MaxPendingKeys:   maxKeys,
-			MaxPendingBytes:  maxBytes,
-			PendingPollEvery: conf.FSPeriodicPoll,
-			PerFlushTimeout:  conf.FSFlushOpTimeout,
-		}, batchedFS)
-	}
-
-	// Start GRPC Server
+	// ── gRPC server ───────────────────────────────────────────────────────────
 	grpcSrv := grpc.NewServer()
-	grpcSrv.RegisterService(&raftpb.ServiceDesc, raft.NewGRPCServer(node))
+	grpcSrv.RegisterService(&raftpb.ServiceDesc, raft.NewGRPCServer(raftNode.Node))
 
 	grpcLis, err := net.Listen("tcp", nodeFlags.GRPCAddr)
 	if err != nil {
 		logger.Error("gRPC listen failed", "addr", nodeFlags.GRPCAddr, "err", err)
 		os.Exit(1)
 	}
-
 	go func() {
 		logger.Info("gRPC listening", "addr", nodeFlags.GRPCAddr)
 		if err := grpcSrv.Serve(grpcLis); err != nil {
@@ -145,81 +101,65 @@ func main() {
 		}
 	}()
 
-	// Start HTTP Server
+	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
-
-	routes := []www.Handler{
+	for _, r := range []www.Handler{
 		api.PingHandler(),
-		api.CreateTableHandler(database, node),
-		api.PutHandler(database, node),
-		api.DeleteHandler(database, node),
+		api.CreateTableHandler(database, raftNode.Node),
+		api.PutHandler(database, raftNode.Node),
+		api.DeleteHandler(database, raftNode.Node),
 		api.GetHandler(database),
 		api.GetBySecondaryKeyHandler(database),
-		api.StateHandler(node),
-	}
-
-	for _, r := range routes {
+		api.StateHandler(raftNode.Node),
+	} {
 		mux.HandleFunc(r.Pattern, r.Fn)
 	}
 
 	httpSrv := &http.Server{Addr: nodeFlags.HTTPAddr, Handler: www.RequestLatency(logger)(mux)}
-
 	go func() {
-		logger.Info("HTTP listening", "addr", nodeFlags.HTTPAddr, "peers", nodeFlags.Peers, "cluster-mode", clusterMode)
+		logger.Info("HTTP listening", "addr", nodeFlags.HTTPAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("HTTP server error", "err", err)
 			stop()
 		}
 	}()
 
-	// Start Raft Node State Machine
-	go node.Run(ctx)
+	// ── Raft state machine + applied-entry loop ───────────────────────────────
+	go raftNode.Run(ctx)
 
-	go func() {
-		for {
-			select {
-			case entry := <-node.Applied():
-				var (
-					promoteVersion string = "EMPTY"
-					oldVersion     string = "EMPTY"
-				)
-
-				if entry.Data.Item.Version != nil {
-					promoteVersion = entry.Data.Item.Version.PromoteVersion
-					oldVersion = entry.Data.Item.Version.OldVersion
-				}
-
-				logger.Info("applied entry", "command", entry.Data.Cmd, "term", entry.Term, "state", node.State(), "data", entry.Data.Item,
-					"old_version", oldVersion, "promote_version", promoteVersion)
-
-				if node.State().Role == raft.Follower.String() {
-					switch entry.Data.Cmd {
-					case commands.CreateTableCmd:
-						if err := database.CreateTable(entry.Data.TableName); err != nil {
-							logger.Error("failed to create table", "error", err)
-							os.Exit(1)
-						}
-					case commands.SetCmd, commands.OptimisticSetCmd:
-						if err := database.ApplyReplicated(ctx, entry.Data.TableName, entry.Data.Item); err != nil {
-							logger.Error("failed to apply replicated set", "error", err)
-							os.Exit(1)
-						}
-					case commands.DeleteCmd, commands.OptimisticDelCmd:
-						if err := database.ApplyReplicatedDelete(ctx, entry.Data.TableName, entry.Data.Item.DelItem()); err != nil {
-							logger.Error("failed to apply replicated delete", "error", err)
-							os.Exit(1)
-						}
-
-					}
-				}
-
-			case <-ctx.Done():
-				return
-			}
+	raftNode.RunAppliedLoop(ctx, func(ctx context.Context, entry raft.LogEntry) error {
+		promoteVersion, oldVersion := "EMPTY", "EMPTY"
+		if entry.Data.Item.Version != nil {
+			promoteVersion = entry.Data.Item.Version.PromoteVersion
+			oldVersion = entry.Data.Item.Version.OldVersion
 		}
-	}()
+		logger.Info("applied entry",
+			"command", entry.Data.Cmd,
+			"term", entry.Term,
+			"raft_index", raftNode.NextIndex(),
+			"state", raftNode.State(),
+			"old_version", oldVersion,
+			"promote_version", promoteVersion,
+		)
 
-	//  Shutdown the node
+		if raftNode.State().Role != raft.Follower.String() {
+			return nil
+		}
+		switch entry.Data.Cmd {
+		case commands.CreateTableCmd:
+			return database.CreateTable(entry.Data.TableName)
+		case commands.SetCmd, commands.OptimisticSetCmd:
+			return database.ApplyReplicated(ctx, entry.Data.TableName, entry.Data.Item)
+		case commands.DeleteCmd, commands.OptimisticDelCmd:
+			return database.ApplyReplicatedDelete(ctx, entry.Data.TableName, entry.Data.Item.DelItem())
+		}
+		return nil
+	}, func(err error) {
+		logger.Error("applied-entry loop fatal error", "error", err)
+		os.Exit(1)
+	})
+
+	// ── Graceful shutdown ─────────────────────────────────────────────────────
 	<-ctx.Done()
 	stop()
 
@@ -228,7 +168,6 @@ func main() {
 		grpcSrv.GracefulStop()
 		close(grpcStopped)
 	}()
-
 	select {
 	case <-grpcStopped:
 	case <-time.After(3 * time.Second):
@@ -241,6 +180,4 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("HTTP shutdown error", "err", err)
 	}
-
-	transport.Close()
 }

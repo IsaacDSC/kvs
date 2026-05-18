@@ -29,7 +29,7 @@ type Node struct {
 	// Persistent state (simplified: kept only in memory)
 	currentTerm int
 	votedFor    string
-	log         []LogEntry //TODO: utilizar o WAL para persistir o log e ter um snapshot do log
+	log         []LogEntry
 
 	// Volatile state
 	state       State
@@ -51,7 +51,7 @@ type Node struct {
 	logger *slog.Logger
 }
 
-// NewNode creates a new Node. Call Run to start the election and replication loops.
+// NewNode creates a new Node with no prior state. Call Run to start the election and replication loops.
 func NewNode(id string, peers []string, transport *Transport, logger *slog.Logger) *Node {
 	return &Node{
 		id:            id,
@@ -59,6 +59,39 @@ func NewNode(id string, peers []string, transport *Transport, logger *slog.Logge
 		state:         Follower,
 		commitIndex:   -1,
 		lastApplied:   -1,
+		transport:     transport,
+		resetElection: make(chan struct{}, 1),
+		applied:       make(chan LogEntry, 128),
+		logger:        logger,
+	}
+}
+
+// PersistedState holds the durable Raft state restored from the RaftWAL on startup.
+// All entries in Log are assumed to have been committed and applied to the KV state
+// machine; the node starts with commitIndex = lastApplied = len(Log)-1 so the leader
+// will not re-deliver already-applied entries to this node.
+type PersistedState struct {
+	// Log is the ordered list of committed+applied entries recovered from raft.wal.
+	Log []LogEntry
+	// CurrentTerm is the last term this node persisted (§5.1).
+	CurrentTerm int
+	// VotedFor is the candidate this node voted for in CurrentTerm (§5.2).
+	VotedFor string
+}
+
+// NewNodeWithState creates a Node with state restored from a previous run.
+// Use instead of NewNode when RaftWAL.Load returned a non-empty result.
+func NewNodeWithState(id string, peers []string, transport *Transport, logger *slog.Logger, ps PersistedState) *Node {
+	commitIndex := len(ps.Log) - 1
+	return &Node{
+		id:            id,
+		peers:         peers,
+		state:         Follower,
+		currentTerm:   ps.CurrentTerm,
+		votedFor:      ps.VotedFor,
+		log:           ps.Log,
+		commitIndex:   commitIndex,
+		lastApplied:   commitIndex,
 		transport:     transport,
 		resetElection: make(chan struct{}, 1),
 		applied:       make(chan LogEntry, 128),
