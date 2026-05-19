@@ -36,13 +36,21 @@ func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 			}
 
 			if err := it.Validate(params.OperationType); err != nil {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnprocessableEntity)
-				_ = json.NewEncoder(w).Encode(err.Json())
+				_, _ = w.Write(err.Json())
+				return
 			}
 
 			cmd := commands.DeleteCmd
 			if params.OperationType == dto.OperationTypeOptimisticLock {
 				cmd = commands.OptimisticDelCmd
+			}
+
+			//validate if node is lead
+			if rpcErr := replicateNodes.PermittedProposeCmd(); rpcErr != nil {
+				writeErrProposeCmd(w, rpcErr)
+				return
 			}
 
 			err := db.Delete(r.Context(), params.TableName, it)
@@ -52,13 +60,12 @@ func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 				return
 			}
 
-			if err := replicateNodes.ProposeCommand(commands.Data{
+			if rpcErr := replicateNodes.ProposeCommand(commands.Data{
 				Cmd:       cmd,
 				TableName: params.TableName,
 				Item:      it.Item(),
-			}); err != nil {
-				w.WriteHeader(getStatusCode(err.Err()))
-				_ = json.NewEncoder(w).Encode(err.RespJson())
+			}); rpcErr != nil {
+				writeErrProposeCmd(w, rpcErr)
 				return
 			}
 

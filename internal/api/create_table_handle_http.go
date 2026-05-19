@@ -11,6 +11,7 @@ import (
 
 type ReplicateNodes interface {
 	ProposeCommand(command commands.Data) *dto.ErrProposeCmd
+	PermittedProposeCmd() *dto.ErrProposeCmd
 }
 
 type Db interface {
@@ -35,17 +36,22 @@ func CreateTableHandler(db Db, replicateNodes ReplicateNodes) www.Handler {
 				return
 			}
 
+			//validate if node is lead
+			if rpcErr := replicateNodes.PermittedProposeCmd(); rpcErr != nil {
+				writeErrProposeCmd(w, rpcErr)
+				return
+			}
+
 			if err := db.CreateTable(input.TableName); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 
-			if err := replicateNodes.ProposeCommand(commands.Data{
+			if rpcErr := replicateNodes.ProposeCommand(commands.Data{
 				Cmd:       commands.CreateTableCmd,
 				TableName: input.TableName,
-			}); err != nil {
-				w.WriteHeader(getStatusCode(err.Err()))
-				json.NewEncoder(w).Encode(err.RespJson())
+			}); rpcErr != nil {
+				writeErrProposeCmd(w, rpcErr)
 				return
 			}
 

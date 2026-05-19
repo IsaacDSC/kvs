@@ -74,23 +74,27 @@ func PutHandler(db PutDb, replicateNodes ReplicateNodes) www.Handler {
 				it.Version = nil
 			}
 
+			//validate if node is lead
+			if rpcErr := replicateNodes.PermittedProposeCmd(); rpcErr != nil {
+				writeErrProposeCmd(w, rpcErr)
+				return
+			}
+
 			if err := db.Set(r.Context(), params.TableName, it); err != nil {
 				http.Error(w, err.Error(), getStatusCode(err))
 				return
 			}
 
-			if err := replicateNodes.ProposeCommand(commands.Data{
+			if rpcErr := replicateNodes.ProposeCommand(commands.Data{
 				Cmd:       cmd,
 				TableName: params.TableName,
 				Item:      it,
-			}); err != nil {
-				w.WriteHeader(getStatusCode(err.Err()))
-				_ = json.NewEncoder(w).Encode(err.RespJson())
+			}); rpcErr != nil {
+				writeErrProposeCmd(w, rpcErr)
 				return
 			}
 
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(it) //nolint:errcheck
 		},
 	}
 }

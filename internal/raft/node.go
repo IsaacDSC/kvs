@@ -207,6 +207,15 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs, reply *AppendEntriesR
 
 }
 
+func (n *Node) PermittedProposeCmd() *dto.ErrProposeCmd {
+	if n.state != Leader {
+		err := fmt.Errorf("%w: send your request to leader=%s (current state: %s)", db.ErrFollowerRejectCmd, n.leaderID, n.state)
+		return dto.NewErrProposeCmd(err, n.state.String(), n.leaderID)
+	}
+
+	return nil
+}
+
 func (n *Node) ProposeCommand(command commands.Data) *dto.ErrProposeCmd {
 	n.mu.Lock()
 	defer n.mu.Unlock()

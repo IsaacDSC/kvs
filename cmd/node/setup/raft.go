@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 
 	"github.com/IsaacDSC/kvs/internal/raft"
@@ -26,6 +27,9 @@ type RaftNode struct {
 // persisted log entries and stable state (currentTerm, votedFor), and returns
 // a node ready to call Run on.
 func OpenRaft(nodeDir, id string, peers []string, transport *raft.Transport, logger *slog.Logger, codec wal.Codec) (*RaftNode, error) {
+	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		return nil, fmt.Errorf("setup: raft wal dir: %w", err)
+	}
 	walPath := filepath.Join(nodeDir, wal.RaftWALFileName)
 	rw, err := wal.OpenRaftWAL(walPath, codec)
 	if err != nil {
