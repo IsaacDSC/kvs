@@ -21,17 +21,6 @@ type NodeStateResponse struct {
 	LogLen      int    `json:"logLen"`
 }
 
-func NewNodeStateResponse(state node.State) NodeStateResponse {
-	return NodeStateResponse{
-		ID:          state.ID,
-		Role:        state.Role,
-		LeaderID:    state.LeaderID,
-		Term:        state.Term,
-		CommitIndex: state.CommitIndex,
-		LogLen:      state.LogLen,
-	}
-}
-
 func StateHandler(node StateNode) www.Handler {
 	return www.Handler{
 		Pattern: "GET /state",

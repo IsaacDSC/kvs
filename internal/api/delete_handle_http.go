@@ -57,8 +57,8 @@ func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 				TableName: params.TableName,
 				Item:      it.Item(),
 			}); err != nil {
-				statusCode := getStatusCode(err)
-				http.Error(w, err.Error(), statusCode)
+				w.WriteHeader(getStatusCode(err.Err()))
+				_ = json.NewEncoder(w).Encode(err.RespJson())
 				return
 			}
 

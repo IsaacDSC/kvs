@@ -84,7 +84,8 @@ func PutHandler(db PutDb, replicateNodes ReplicateNodes) www.Handler {
 				TableName: params.TableName,
 				Item:      it,
 			}); err != nil {
-				http.Error(w, err.Error(), getStatusCode(err))
+				w.WriteHeader(getStatusCode(err.Err()))
+				_ = json.NewEncoder(w).Encode(err.RespJson())
 				return
 			}
 

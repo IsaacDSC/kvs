@@ -5,11 +5,12 @@ import (
 	"net/http"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
+	"github.com/IsaacDSC/kvs/internal/dto"
 	"github.com/IsaacDSC/kvs/pkg/www"
 )
 
 type ReplicateNodes interface {
-	ProposeCommand(command commands.Data) error
+	ProposeCommand(command commands.Data) *dto.ErrProposeCmd
 }
 
 type Db interface {
@@ -43,7 +44,8 @@ func CreateTableHandler(db Db, replicateNodes ReplicateNodes) www.Handler {
 				Cmd:       commands.CreateTableCmd,
 				TableName: input.TableName,
 			}); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				w.WriteHeader(getStatusCode(err.Err()))
+				json.NewEncoder(w).Encode(err.RespJson())
 				return
 			}
 

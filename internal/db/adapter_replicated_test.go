@@ -85,7 +85,8 @@ func TestApplyReplicated_appliesEvenWhenVersionAlreadyPresent(t *testing.T) {
 	_ = store.Set(context.Background(), "t", item.Entity{Key: "k", SK: "f", Value: "v", Version: "2"})
 
 	log := &memLog{}
-	adapter := New(store, log, nil)
+	cc := cache.New[item.Entity](8, 0)
+	adapter := New(store, log, cc)
 
 	it := dto.Item{
 		Key:     "k",
@@ -113,7 +114,8 @@ func TestApplyReplicated_appliesOldEntryDuringCatchUp(t *testing.T) {
 	_ = store.Set(context.Background(), "t", item.Entity{Key: "k", Version: "3"})
 
 	log := &memLog{}
-	adapter := New(store, log, nil)
+	cc := cache.New[item.Entity](8, 0)
+	adapter := New(store, log, cc)
 
 	// Replaying an older entry that sets version=1 — correct Raft behaviour.
 	it := dto.Item{Key: "k", Value: map[string]any{"x": 1}}
@@ -155,7 +157,8 @@ func TestSet_rejectsStaleOptimisticLock(t *testing.T) {
 	_ = store.Set(context.Background(), "t", item.Entity{Key: "k", Version: "2"})
 
 	log := &memLog{}
-	adapter := New(store, log, nil)
+	cc := cache.New[item.Entity](8, 0)
+	adapter := New(store, log, cc)
 
 	it := dto.Item{
 		Key:     "k",

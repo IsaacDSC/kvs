@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
+	"github.com/IsaacDSC/kvs/internal/db"
+	"github.com/IsaacDSC/kvs/internal/dto"
 	"github.com/IsaacDSC/kvs/internal/node"
 )
 
@@ -205,35 +207,22 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs, reply *AppendEntriesR
 
 }
 
-func (n *Node) ProposeCommand(command commands.Data) error {
+func (n *Node) ProposeCommand(command commands.Data) *dto.ErrProposeCmd {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if n.state != Leader {
 		if n.leaderID != "" {
-			return fmt.Errorf("not the leader: send your request to leader=%s (current state: %s)", n.leaderID, n.state)
+			err := fmt.Errorf("%w: send your request to leader=%s (current state: %s)", db.ErrFollowerRejectCmd, n.leaderID, n.state)
+			return dto.NewErrProposeCmd(err, n.state.String(), n.leaderID)
 		}
-		return fmt.Errorf("not the leader: no leader known yet (current state: %s)", n.state)
+		err := fmt.Errorf("%w: no leader known yet (current state: %s)", db.ErrFollowerRejectCmd, n.state)
+		return dto.NewErrProposeCmd(err, n.state.String(), n.leaderID)
 	}
 
 	n.log = append(n.log, LogEntry{Term: n.currentTerm, Data: command})
 	n.logger.Info("proposed", "command", command, "index", len(n.log)-1)
 
-	return nil
-}
-
-func (n *Node) Propose(command string) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	if n.state != Leader {
-		// TODO: retornar o leader ID e host para o cliente
-		return fmt.Errorf("not the leader (current state: %s)", n.state)
-	}
-
-	// TODO: remover depois quando não utilizar mais a rota de command e ter que aceitar string
-	n.log = append(n.log, LogEntry{Term: n.currentTerm, Data: commands.Data{}})
-	n.logger.Info("proposed", "command", command, "index", len(n.log)-1)
 	return nil
 }
 
@@ -385,7 +374,6 @@ func (n *Node) runCandidate(ctx context.Context) {
 	}
 
 	for _, peer := range n.peers {
-		peer := peer
 		go func() {
 			var reply RequestVoteReply
 			if err := n.transport.RequestVote(ctx, peer, args, &reply); err != nil {
@@ -444,6 +432,7 @@ func (n *Node) runLeader(ctx context.Context) {
 		n.matchIndex[peer] = -1
 	}
 	n.leaderID = n.id // we are the leader
+
 	term := n.currentTerm
 	n.logger.Info("became leader", "term", term)
 	n.mu.Unlock()
@@ -473,7 +462,6 @@ func (n *Node) runLeader(ctx context.Context) {
 // broadcastAppendEntries sends AppendEntries RPCs to all peers concurrently.
 func (n *Node) broadcastAppendEntries(ctx context.Context, term int) {
 	for _, peer := range n.peers {
-		peer := peer
 		go n.sendAppendEntries(ctx, peer, term)
 	}
 }
