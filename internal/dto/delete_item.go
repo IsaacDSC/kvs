@@ -6,7 +6,7 @@ import (
 )
 
 type DeleteItem struct {
-	Key     string   `param:"key"`
+	Key     string   `json:"key" param:"key"`
 	Version *Version `json:"version"`
 }
 

@@ -111,7 +111,7 @@ func main() {
 		api.GetBySecondaryKeyHandler(database),
 		api.StateHandler(raftNode.Node),
 	} {
-		mux.HandleFunc(r.Pattern, r.Fn)
+		mux.HandleFunc(r.Pattern, www.HandlerHttp(r.Fn))
 	}
 
 	httpSrv := &http.Server{Addr: nodeFlags.HTTPAddr, Handler: www.RequestLatency(logger)(mux)}

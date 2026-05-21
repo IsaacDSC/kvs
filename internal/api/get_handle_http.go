@@ -21,20 +21,23 @@ type getParams struct {
 func GetHandler(db GetDb) www.Handler {
 	return www.Handler{
 		Pattern: "GET /table/{tableName}/{key}",
-		Fn: func(w http.ResponseWriter, r *http.Request) {
+		Fn: func(r *http.Request) *www.Response {
 			var params getParams
 			if err := www.DecodeParams(r, &params); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
+				return www.NewResponse(
+					www.StatusCode(http.StatusBadRequest),
+					www.RespErr(err),
+				)
 			}
 
 			entity, err := db.Get(r.Context(), params.TableName, params.Key)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+				return www.NewResponse(
+					www.StatusCode(getStatusCode(err)),
+					www.RespErr(err),
+				)
 			}
 
-			// entity.Value may be map[interface{}]interface{} after CBOR (DecodeItem); encoding/json rejects that.
 			resp := struct {
 				TableName string `json:"table_name"`
 				Key       string `json:"key"`
@@ -48,7 +51,10 @@ func GetHandler(db GetDb) www.Handler {
 				Value:     jsonSafeAny(entity.Value),
 				Version:   entity.Version,
 			}
-			www.WriteJSON(w, http.StatusOK, resp)
+			return www.NewResponse(
+				www.StatusCode(http.StatusOK),
+				www.Body(resp),
+			)
 		},
 	}
 }
@@ -65,17 +71,21 @@ type getBySecondaryKeyParams struct {
 func GetBySecondaryKeyHandler(db getBySecondaryKeyDb) www.Handler {
 	return www.Handler{
 		Pattern: "GET /table/{tableName}",
-		Fn: func(w http.ResponseWriter, r *http.Request) {
+		Fn: func(r *http.Request) *www.Response {
 			var params getBySecondaryKeyParams
 			if err := www.DecodeParams(r, &params); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
+				return www.NewResponse(
+					www.StatusCode(http.StatusBadRequest),
+					www.RespErr(err),
+				)
 			}
 
 			entities, err := db.GetBySecondaryKey(r.Context(), params.TableName, params.SecondaryKey)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+				return www.NewResponse(
+					www.StatusCode(getStatusCode(err)),
+					www.RespErr(err),
+				)
 			}
 
 			type entityResponse struct {
@@ -97,7 +107,10 @@ func GetBySecondaryKeyHandler(db getBySecondaryKeyDb) www.Handler {
 				})
 			}
 
-			www.WriteJSON(w, http.StatusOK, out)
+			return www.NewResponse(
+				www.StatusCode(http.StatusOK),
+				www.Body(out),
+			)
 		},
 	}
 }

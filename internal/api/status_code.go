@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/IsaacDSC/kvs/internal/db"
-	"github.com/IsaacDSC/kvs/internal/dto"
 )
 
 func getStatusCode(err error) int {
@@ -19,10 +18,4 @@ func getStatusCode(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
-}
-
-func writeErrProposeCmd(w http.ResponseWriter, rpcErr *dto.ErrProposeCmd) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(getStatusCode(rpcErr.Err()))
-	_, _ = w.Write(rpcErr.RespJson())
 }

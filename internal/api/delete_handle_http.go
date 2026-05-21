@@ -22,24 +22,32 @@ type deleteParams struct {
 func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 	return www.Handler{
 		Pattern: "DELETE /table/{tableName}",
-		Fn: func(w http.ResponseWriter, r *http.Request) {
+		Fn: func(r *http.Request) *www.Response {
 			var params deleteParams
 			if err := www.DecodeParams(r, &params); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
+				return www.NewResponse(
+					www.StatusCode(http.StatusBadRequest),
+					www.RespErr(err),
+				)
 			}
 
 			var it dto.DeleteItem
 			if err := json.NewDecoder(r.Body).Decode(&it); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
+				return www.NewResponse(
+					www.StatusCode(http.StatusBadRequest),
+					www.RespErr(err),
+				)
 			}
 
-			if err := it.Validate(params.OperationType); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnprocessableEntity)
-				_, _ = w.Write(err.Json())
-				return
+			if fe := it.Validate(params.OperationType); fe != nil {
+				var payload map[string]any
+				if err := json.Unmarshal(fe.Json(), &payload); err != nil {
+					payload = map[string]any{"error": string(fe.Json())}
+				}
+				return www.NewResponse(
+					www.StatusCode(http.StatusUnprocessableEntity),
+					www.Body(payload),
+				)
 			}
 
 			cmd := commands.DeleteCmd
@@ -47,17 +55,22 @@ func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 				cmd = commands.OptimisticDelCmd
 			}
 
-			//validate if node is lead
 			if rpcErr := replicateNodes.PermittedProposeCmd(); rpcErr != nil {
-				writeErrProposeCmd(w, rpcErr)
-				return
+				var payload map[string]any
+				if err := json.Unmarshal(rpcErr.RespJson(), &payload); err != nil {
+					payload = map[string]any{"error": string(rpcErr.RespJson())}
+				}
+				return www.NewResponse(
+					www.StatusCode(getStatusCode(rpcErr.Err())),
+					www.Body(payload),
+				)
 			}
 
-			err := db.Delete(r.Context(), params.TableName, it)
-			if err != nil {
-				statusCode := getStatusCode(err)
-				http.Error(w, err.Error(), statusCode)
-				return
+			if err := db.Delete(r.Context(), params.TableName, it); err != nil {
+				return www.NewResponse(
+					www.StatusCode(getStatusCode(err)),
+					www.RespErr(err),
+				)
 			}
 
 			if rpcErr := replicateNodes.ProposeCommand(commands.Data{
@@ -65,11 +78,17 @@ func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 				TableName: params.TableName,
 				Item:      it.Item(),
 			}); rpcErr != nil {
-				writeErrProposeCmd(w, rpcErr)
-				return
+				var payload map[string]any
+				if err := json.Unmarshal(rpcErr.RespJson(), &payload); err != nil {
+					payload = map[string]any{"error": string(rpcErr.RespJson())}
+				}
+				return www.NewResponse(
+					www.StatusCode(getStatusCode(rpcErr.Err())),
+					www.Body(payload),
+				)
 			}
 
-			w.WriteHeader(http.StatusNoContent)
+			return www.NewResponse(www.StatusCode(http.StatusNoContent))
 		},
 	}
 }

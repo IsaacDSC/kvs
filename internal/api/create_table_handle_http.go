@@ -29,34 +29,52 @@ type createTableOutput struct {
 func CreateTableHandler(db Db, replicateNodes ReplicateNodes) www.Handler {
 	return www.Handler{
 		Pattern: "POST /table",
-		Fn: func(w http.ResponseWriter, r *http.Request) {
+		Fn: func(r *http.Request) *www.Response {
 			var input createTableInput
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
+				return www.NewResponse(
+					www.StatusCode(http.StatusBadRequest),
+					www.RespErr(err),
+				)
 			}
 
 			//validate if node is lead
 			if rpcErr := replicateNodes.PermittedProposeCmd(); rpcErr != nil {
-				writeErrProposeCmd(w, rpcErr)
-				return
+				var payload map[string]any
+				if err := json.Unmarshal(rpcErr.RespJson(), &payload); err != nil {
+					payload = map[string]any{"error": string(rpcErr.RespJson())}
+				}
+				return www.NewResponse(
+					www.StatusCode(getStatusCode(rpcErr.Err())),
+					www.Body(payload),
+				)
 			}
 
 			if err := db.CreateTable(input.TableName); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+				return www.NewResponse(
+					www.StatusCode(http.StatusInternalServerError),
+					www.RespErr(err),
+				)
 			}
 
 			if rpcErr := replicateNodes.ProposeCommand(commands.Data{
 				Cmd:       commands.CreateTableCmd,
 				TableName: input.TableName,
 			}); rpcErr != nil {
-				writeErrProposeCmd(w, rpcErr)
-				return
+				var payload map[string]any
+				if err := json.Unmarshal(rpcErr.RespJson(), &payload); err != nil {
+					payload = map[string]any{"error": string(rpcErr.RespJson())}
+				}
+				return www.NewResponse(
+					www.StatusCode(getStatusCode(rpcErr.Err())),
+					www.Body(payload),
+				)
 			}
 
-			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(createTableOutput{TableName: input.TableName}) //nolint:errcheck
+			return www.NewResponse(
+				www.StatusCode(http.StatusCreated),
+				www.Body(createTableOutput{TableName: input.TableName}),
+			)
 		},
 	}
 }
