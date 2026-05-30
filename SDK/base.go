@@ -30,9 +30,14 @@ func GetOrCreateTable(host, tableName string) (*Table, error) {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK && !strings.Contains(string(b), "follower") {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("create table: status %d: %s", resp.StatusCode, b)
+	// Server returns 201 Created on success; followers may reject with a body mentioning the leader.
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated, http.StatusAccepted:
+		break
+	default:
+		if !strings.Contains(string(b), "follower") {
+			return nil, fmt.Errorf("create table: status %d: %s", resp.StatusCode, b)
+		}
 	}
 
 	return &Table{host: host, name: tableName}, nil

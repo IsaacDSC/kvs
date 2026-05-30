@@ -43,7 +43,7 @@ type Node struct {
 	nextIndex  map[string]int // next log index to send to each peer
 	matchIndex map[string]int // highest log index known to be replicated on each peer
 
-	transport *Transport
+	transport Network
 
 	// resetElection is signalled by incoming RPCs to prevent spurious elections.
 	resetElection chan struct{}
@@ -51,9 +51,8 @@ type Node struct {
 	// applied receives committed entries so the caller can run a state machine.
 	applied chan LogEntry
 
-	// commitNotify is a buffered-1 channel that wakes up the delivery goroutine
-	// whenever commitIndex advances. Using a separate goroutine for delivery
-	// allows blocking channel sends without holding n.mu, eliminating silent drops.
+	// commitNotify wakes runDelivery whenever commitIndex advances. Send happens
+	// only after unlocking n.mu (never non-blocking with default) so wakes are never lost.
 	commitNotify chan struct{}
 
 	// onMetaPersist, when non-nil, is called (outside n.mu) whenever currentTerm
@@ -65,7 +64,7 @@ type Node struct {
 }
 
 // NewNode creates a new Node with no prior state. Call Run to start the election and replication loops.
-func NewNode(id string, peers []string, transport *Transport, logger *slog.Logger) *Node {
+func NewNode(id string, peers []string, transport Network, logger *slog.Logger) *Node {
 	return &Node{
 		id:            id,
 		peers:         peers,
@@ -75,7 +74,7 @@ func NewNode(id string, peers []string, transport *Transport, logger *slog.Logge
 		transport:     transport,
 		resetElection: make(chan struct{}, 1),
 		applied:       make(chan LogEntry, 128),
-		commitNotify:  make(chan struct{}, 1),
+		commitNotify:  make(chan struct{}, 1024),
 		logger:        logger,
 	}
 }
@@ -95,7 +94,7 @@ type PersistedState struct {
 
 // NewNodeWithState creates a Node with state restored from a previous run.
 // Use instead of NewNode when RaftWAL.Load returned a non-empty result.
-func NewNodeWithState(id string, peers []string, transport *Transport, logger *slog.Logger, ps PersistedState) *Node {
+func NewNodeWithState(id string, peers []string, transport Network, logger *slog.Logger, ps PersistedState) *Node {
 	commitIndex := len(ps.Log) - 1
 	return &Node{
 		id:            id,
@@ -109,7 +108,7 @@ func NewNodeWithState(id string, peers []string, transport *Transport, logger *s
 		transport:     transport,
 		resetElection: make(chan struct{}, 1),
 		applied:       make(chan LogEntry, 128),
-		commitNotify:  make(chan struct{}, 1),
+		commitNotify:  make(chan struct{}, 1024),
 		logger:        logger,
 	}
 }
@@ -143,8 +142,14 @@ func (n *Node) HandleRequestVote(args RequestVoteArgs, reply *RequestVoteReply) 
 }
 
 func (n *Node) HandleAppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	var wakeDelivery bool
 	n.mu.Lock()
-	defer n.mu.Unlock()
+	defer func() {
+		n.mu.Unlock()
+		if wakeDelivery {
+			n.commitNotify <- struct{}{}
+		}
+	}()
 
 	if args.Term < n.currentTerm {
 		reply.Term = n.currentTerm
@@ -196,11 +201,7 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs, reply *AppendEntriesR
 			newCommit = lastIdx
 		}
 		n.commitIndex = newCommit
-		// Wake up the delivery goroutine (non-blocking; one pending signal is enough).
-		select {
-		case n.commitNotify <- struct{}{}:
-		default:
-		}
+		wakeDelivery = true
 	}
 
 	reply.Success = true
@@ -229,22 +230,36 @@ func (n *Node) ProposeCommand(command commands.Data) *dto.ErrProposeCmd {
 		return dto.NewErrProposeCmd(err, n.state.String(), n.leaderID)
 	}
 
+	if command.MinAcks != 0 {
+		if err := n.validateStrictRepMinAcks(command.MinAcks); err != nil {
+			return dto.NewErrProposeCmd(err, n.state.String(), n.leaderID)
+		}
+	}
+
 	n.log = append(n.log, LogEntry{Term: n.currentTerm, Data: command})
 	n.logger.Info("proposed", "command", command, "index", len(n.log)-1)
 
 	return nil
 }
 
+// FullClusterReplicationMinAcks is the ACK count when every cluster member must acknowledge (self + all peers).
+func (n *Node) FullClusterReplicationMinAcks() int {
+	return len(n.peers) + 1
+}
+
 func (n *Node) State() node.State {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	maj := n.majority()
 	return node.State{
-		ID:          n.id,
-		Role:        n.state.String(),
-		LeaderID:    n.leaderID,
-		Term:        n.currentTerm,
-		CommitIndex: n.commitIndex,
-		LogLen:      len(n.log),
+		ID:                  n.id,
+		Role:                n.state.String(),
+		LeaderID:            n.leaderID,
+		Term:                n.currentTerm,
+		CommitIndex:         n.commitIndex,
+		LogLen:              len(n.log),
+		MajorityRepMinAcks:  maj,
+		EffectiveRepMinAcks: n.effectiveRepMinAcks(),
 	}
 }
 
@@ -363,10 +378,10 @@ func (n *Node) runCandidate(ctx context.Context) {
 	n.mu.Unlock()
 
 	votes := 1 // vote for self
-	quorum := n.quorum()
+	voteQuorum := n.majority()
 	voteCh := make(chan bool, len(n.peers))
 
-	if votes >= quorum {
+	if votes >= voteQuorum {
 		n.mu.Lock()
 		if n.state == Candidate && n.currentTerm == term {
 			n.state = Leader
@@ -418,7 +433,7 @@ func (n *Node) runCandidate(ctx context.Context) {
 			if granted {
 				votes++
 			}
-			if votes >= quorum {
+			if votes >= voteQuorum {
 				n.mu.Lock()
 				// Guard: another goroutine may have stepped us down already.
 				if n.state == Candidate && n.currentTerm == term {
@@ -506,13 +521,15 @@ func (n *Node) sendAppendEntries(ctx context.Context, peer string, term int) {
 	}
 
 	n.mu.Lock()
-	defer n.mu.Unlock()
+	advancedCommit := false
 
 	if reply.Term > n.currentTerm {
 		n.stepDown(reply.Term)
+		n.mu.Unlock()
 		return
 	}
 	if n.state != Leader || n.currentTerm != term {
+		n.mu.Unlock()
 		return
 	}
 
@@ -520,46 +537,91 @@ func (n *Node) sendAppendEntries(ctx context.Context, peer string, term int) {
 		if len(entries) > 0 {
 			n.nextIndex[peer] = len(n.log)
 			n.matchIndex[peer] = len(n.log) - 1
-			n.maybeAdvanceCommit(term)
+		}
+		if n.maybeAdvanceCommit(term) {
+			advancedCommit = true
 		}
 	} else if n.nextIndex[peer] > 0 {
 		// Log inconsistency: back up and retry on the next heartbeat.
 		n.nextIndex[peer]--
 	}
-}
+	n.mu.Unlock()
 
-// maybeAdvanceCommit checks whether a new commit index can be established.
-// Must be called with n.mu held.
-func (n *Node) maybeAdvanceCommit(term int) {
-	// Walk backwards from the newest entry to find the highest index
-	// replicated on a quorum of nodes.
-	for idx := len(n.log) - 1; idx > n.commitIndex; idx-- {
-		// §5.4.2: only commit entries from the current term.
-		if n.log[idx].Term != term {
-			break
-		}
-		count := 1 // leader itself
-		for _, peer := range n.peers {
-			if n.matchIndex[peer] >= idx {
-				count++
-			}
-		}
-		if count >= n.quorum() {
-			n.commitIndex = idx
-			// Wake up the delivery goroutine (non-blocking; one pending signal is enough).
-			select {
-			case n.commitNotify <- struct{}{}:
-			default:
-			}
-			n.logger.Info("committed", "index", idx, "term", term)
-			break
+	if advancedCommit {
+		select {
+		case n.commitNotify <- struct{}{}:
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
-// quorum returns the minimum number of votes (including self) needed to win.
-func (n *Node) quorum() int {
+// maybeAdvanceCommit extends commitIndex for consecutive log indices in leader term while
+// each entry satisfies replication: commands.Data.MinAcks when positive, otherwise every member (N).
+//
+// Must be called with n.mu held. Returns whether commitIndex advanced (caller must notify
+// runDelivery after releasing n.mu).
+func (n *Node) maybeAdvanceCommit(term int) bool {
+	advanced := false
+	for {
+		next := n.commitIndex + 1
+		if next >= len(n.log) {
+			break
+		}
+		if n.log[next].Term != term {
+			break
+		}
+		need := n.minAcksRequiredToCommit(next)
+		if n.replicatedAckCount(next) < need {
+			break
+		}
+		n.commitIndex = next
+		advanced = true
+		n.logger.Info("committed", "index", next, "term", term, "min_acks_required", need)
+	}
+	return advanced
+}
+
+// majority returns the classical Raft majority for this membership (⌊N/2⌋+1).
+func (n *Node) majority() int {
 	return (len(n.peers)+1)/2 + 1
+}
+
+// effectiveRepMinAcks is the ACK count for commits whose Data.MinAcks is omitted (requires every member).
+// Elections still use classical majority via `majority`; see runCandidate.
+func (n *Node) effectiveRepMinAcks() int {
+	return len(n.peers) + 1
+}
+
+// replicatedAckCount is how many cluster members have replicated log[idx] (leader counts as replicated).
+func (n *Node) replicatedAckCount(idx int) int {
+	cnt := 1 // leader itself
+	for _, peer := range n.peers {
+		if n.matchIndex[peer] >= idx {
+			cnt++
+		}
+	}
+	return cnt
+}
+
+// minAcksRequiredToCommit is the replication bar for admitting log[idx] to the committed prefix.
+func (n *Node) minAcksRequiredToCommit(idx int) int {
+	if v := n.log[idx].Data.MinAcks; v > 0 {
+		return v
+	}
+	return n.effectiveRepMinAcks()
+}
+
+func (n *Node) validateStrictRepMinAcks(minAcks int) error {
+	maj := n.majority()
+	maxN := len(n.peers) + 1
+	if minAcks < maj || minAcks > maxN {
+		return fmt.Errorf(
+			"raft: min_acks %d out of safe range [%d,%d] for cluster size %d",
+			minAcks, maj, maxN, maxN,
+		)
+	}
+	return nil
 }
 
 // lastLogInfo returns the index and term of the last log entry.

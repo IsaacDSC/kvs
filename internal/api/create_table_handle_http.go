@@ -12,6 +12,7 @@ import (
 type ReplicateNodes interface {
 	ProposeCommand(command commands.Data) *dto.ErrProposeCmd
 	PermittedProposeCmd() *dto.ErrProposeCmd
+	FullClusterReplicationMinAcks() int
 }
 
 type Db interface {
@@ -19,7 +20,8 @@ type Db interface {
 }
 
 type createTableInput struct {
-	TableName string `json:"table_name"`
+	TableName   string `json:"table_name"`
+	RaftMinAcks int    `json:"raft_min_acks,omitempty"`
 }
 
 type createTableOutput struct {
@@ -60,6 +62,7 @@ func CreateTableHandler(db Db, replicateNodes ReplicateNodes) www.Handler {
 			if rpcErr := replicateNodes.ProposeCommand(commands.Data{
 				Cmd:       commands.CreateTableCmd,
 				TableName: input.TableName,
+				MinAcks:   HTTPDefaultRaftMinAcks(replicateNodes, input.RaftMinAcks),
 			}); rpcErr != nil {
 				var payload map[string]any
 				if err := json.Unmarshal(rpcErr.RespJson(), &payload); err != nil {

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/IsaacDSC/kvs/internal/commands"
@@ -17,6 +18,14 @@ type DeleteDb interface {
 type deleteParams struct {
 	TableName     string            `param:"tableName"`
 	OperationType dto.OperationType `query:"operation"`
+	RaftMinAcks   int               `query:"raft_min_acks"`
+}
+
+func (p *deleteParams) Validate() error {
+	if p.RaftMinAcks < 0 {
+		return errors.New("invalid raft_min_acks")
+	}
+	return nil
 }
 
 func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
@@ -30,6 +39,15 @@ func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 					www.RespErr(err),
 				)
 			}
+
+			if err := params.Validate(); err != nil {
+				return www.NewResponse(
+					www.StatusCode(http.StatusBadRequest),
+					www.RespErr(err),
+				)
+			}
+
+			minAcks := HTTPDefaultRaftMinAcks(replicateNodes, params.RaftMinAcks)
 
 			var it dto.DeleteItem
 			if err := json.NewDecoder(r.Body).Decode(&it); err != nil {
@@ -77,6 +95,7 @@ func DeleteHandler(db DeleteDb, replicateNodes ReplicateNodes) www.Handler {
 				Cmd:       cmd,
 				TableName: params.TableName,
 				Item:      it.Item(),
+				MinAcks:   minAcks,
 			}); rpcErr != nil {
 				var payload map[string]any
 				if err := json.Unmarshal(rpcErr.RespJson(), &payload); err != nil {
