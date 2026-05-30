@@ -31,18 +31,21 @@ func GrpcHandle(l Log, database ReplicateDb, raftNode RaftNode) func(ctx context
 			promoteVersion = entry.Data.Item.Version.PromoteVersion
 			oldVersion = entry.Data.Item.Version.OldVersion
 		}
+		st := raftNode.State()
 		l.Info("applied entry",
 			"command", entry.Data.Cmd,
 			"term", entry.Term,
 			"raft_index", raftNode.NextIndex(),
-			"state", raftNode.State(),
+			"state", st,
 			"old_version", oldVersion,
 			"promote_version", promoteVersion,
 		)
 
-		if raftNode.State().Role != raft.Follower.String() {
+		// KV mutations replicate only onto followers—the leader applied them eagerly on propose.
+		if st.Role != raft.Follower.String() {
 			return nil
 		}
+
 		switch entry.Data.Cmd {
 		case commands.CreateTableCmd:
 			return database.CreateTable(entry.Data.TableName)

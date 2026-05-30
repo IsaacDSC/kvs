@@ -26,7 +26,7 @@ type RaftNode struct {
 // OpenRaft opens (or creates) the Raft WAL at nodeDir/raft.wal, restores
 // persisted log entries and stable state (currentTerm, votedFor), and returns
 // a node ready to call Run on.
-func OpenRaft(nodeDir, id string, peers []string, transport *raft.Transport, logger *slog.Logger, codec wal.Codec) (*RaftNode, error) {
+func OpenRaft(nodeDir, id string, peers []string, transport raft.Network, logger *slog.Logger, codec wal.Codec) (*RaftNode, error) {
 	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
 		return nil, fmt.Errorf("setup: raft wal dir: %w", err)
 	}

@@ -4,13 +4,15 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strconv"
 )
 
 // decodeParams preenche um struct apontado por out usando tags:
 //   - param:"nome" → r.PathValue("nome")
 //   - query:"nome" → r.URL.Query().Get("nome")
 //
-// Campos sem valor na fonte ficam em zero-value. Tipos com Kind string (incl. aliases como operationType) são aceites.
+// Campos sem valor na fonte ficam em zero-value. Tipos string (incl. aliases como operationType)
+// e inteiros com sinal/sem sinal são aceites.
 func DecodeParams(r *http.Request, out any) error {
 	rv := reflect.ValueOf(out)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
@@ -53,11 +55,27 @@ func DecodeParams(r *http.Request, out any) error {
 }
 
 func assignPathOrQueryField(f reflect.Value, s string) error {
-	switch f.Kind() {
+	switch k := f.Kind(); k {
 	case reflect.String:
 		f.SetString(s)
 		return nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		bits := f.Type().Bits()
+		v, err := strconv.ParseInt(s, 10, int(bits))
+		if err != nil {
+			return fmt.Errorf("valor inteiro inválido: %w", err)
+		}
+		f.SetInt(v)
+		return nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		bits := f.Type().Bits()
+		v, err := strconv.ParseUint(s, 10, int(bits))
+		if err != nil {
+			return fmt.Errorf("valor inteiro inválido: %w", err)
+		}
+		f.SetUint(v)
+		return nil
 	default:
-		return fmt.Errorf("tipo não suportado: %v", f.Kind())
+		return fmt.Errorf("tipo não suportado: %v", k)
 	}
 }

@@ -19,6 +19,7 @@ type PutDb interface {
 type putParams struct {
 	TableName     string            `param:"tableName"`
 	OperationType dto.OperationType `query:"operation"`
+	RaftMinAcks   int               `query:"raft_min_acks"`
 }
 
 func (p *putParams) Validate() error {
@@ -33,6 +34,10 @@ func (p *putParams) Validate() error {
 	validOperationTypes := []dto.OperationType{dto.OperationTypeOptimisticLock, dto.OperationTypeNormal}
 	if !slices.Contains(validOperationTypes, p.OperationType) {
 		return errors.New("operation type is invalid")
+	}
+
+	if p.RaftMinAcks < 0 {
+		return errors.New("invalid raft_min_acks")
 	}
 
 	return nil
@@ -56,6 +61,8 @@ func PutHandler(db PutDb, replicateNodes ReplicateNodes) www.Handler {
 					www.RespErr(err),
 				)
 			}
+
+			minAcks := HTTPDefaultRaftMinAcks(replicateNodes, params.RaftMinAcks)
 
 			var it dto.Item
 			if err := json.NewDecoder(r.Body).Decode(&it); err != nil {
@@ -105,6 +112,7 @@ func PutHandler(db PutDb, replicateNodes ReplicateNodes) www.Handler {
 				Cmd:       cmd,
 				TableName: params.TableName,
 				Item:      it,
+				MinAcks:   minAcks,
 			}); rpcErr != nil {
 				var payload map[string]any
 				if err := json.Unmarshal(rpcErr.RespJson(), &payload); err != nil {
