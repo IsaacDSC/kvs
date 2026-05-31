@@ -36,6 +36,15 @@ func (m *memStore) Set(_ context.Context, table string, entity item.Entity) erro
 	return nil
 }
 
+func (m *memStore) BulkSet(ctx context.Context, table string, entities []item.Entity) error {
+	for _, entity := range entities {
+		if err := m.Set(ctx, table, entity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *memStore) Get(_ context.Context, table, key string) (item.Entity, error) {
 	if t, ok := m.tables[table]; ok {
 		if ent, ok2 := t[key]; ok2 {
@@ -57,12 +66,21 @@ func (m *memStore) Del(_ context.Context, table, key string) error {
 }
 
 type memLog struct {
-	sets    int
-	deletes int
+	sets       int
+	deletes    int
+	bulkSetErr error
 }
 
 func (l *memLog) Set(_ context.Context, _ string, _ item.Entity) error {
 	l.sets++
+	return nil
+}
+
+func (l *memLog) BulkSet(_ context.Context, _ string, entities []item.Entity) error {
+	if l.bulkSetErr != nil {
+		return l.bulkSetErr
+	}
+	l.sets += len(entities)
 	return nil
 }
 
@@ -171,5 +189,65 @@ func TestSet_rejectsStaleOptimisticLock(t *testing.T) {
 	}
 	if log.sets != 0 {
 		t.Fatalf("WAL must not be written on validation failure, got %d sets", log.sets)
+	}
+}
+
+// ApplyReplicatedBulk persists the whole batch through the WAL and then the store,
+// overwriting pre-existing keys (the catch-up/replay scenario) without per-item checks.
+func TestApplyReplicatedBulk_writesBatchToWALThenStore(t *testing.T) {
+	store := newMemStore()
+	_ = store.CreateTable("t")
+	_ = store.Set(context.Background(), "t", item.Entity{Key: "k1", Value: "old"})
+
+	log := &memLog{}
+	cc := cache.New[item.Entity](8, 0)
+	adapter := New(store, log, cc)
+
+	its := dto.Items{
+		{Key: "k1", Value: map[string]any{"x": 1}},
+		{Key: "k2", SK: "s", Value: map[string]any{"y": 2}},
+	}
+	if err := adapter.ApplyReplicatedBulk(context.Background(), "t", its); err != nil {
+		t.Fatalf("ApplyReplicatedBulk: unexpected error: %v", err)
+	}
+
+	if log.sets != 2 {
+		t.Fatalf("expected 2 WAL appends, got %d", log.sets)
+	}
+
+	got1, err := store.Get(context.Background(), "t", "k1")
+	if err != nil {
+		t.Fatalf("get k1: %v", err)
+	}
+	if m, ok := got1.Value.(map[string]any); !ok || m["x"] != 1 {
+		t.Fatalf("k1 not overwritten with batch value, got %#v", got1.Value)
+	}
+
+	got2, err := store.Get(context.Background(), "t", "k2")
+	if err != nil {
+		t.Fatalf("get k2: %v", err)
+	}
+	if got2.SK != "s" {
+		t.Fatalf("k2 sk=%q want %q", got2.SK, "s")
+	}
+}
+
+// A WAL failure must abort ApplyReplicatedBulk before any entity reaches the store,
+// so a follower never diverges by persisting a batch the log rejected.
+func TestApplyReplicatedBulk_walErrorSkipsStore(t *testing.T) {
+	store := newMemStore()
+	_ = store.CreateTable("t")
+
+	log := &memLog{bulkSetErr: errors.New("wal unavailable")}
+	cc := cache.New[item.Entity](8, 0)
+	adapter := New(store, log, cc)
+
+	its := dto.Items{{Key: "k1", Value: map[string]any{"x": 1}}}
+	if err := adapter.ApplyReplicatedBulk(context.Background(), "t", its); err == nil {
+		t.Fatal("expected error from WAL, got nil")
+	}
+
+	if _, err := store.Get(context.Background(), "t", "k1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("store must be untouched after WAL failure, got %v", err)
 	}
 }

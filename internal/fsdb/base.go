@@ -52,6 +52,124 @@ func (d *Db) Set(ctx context.Context, table string, data item.Entity) error {
 	d.tbmu.Lock(table)
 	defer d.tbmu.Unlock(table)
 
+	return d.setLocked(table, data)
+}
+
+// bulkWriteConcurrency bounds how many key files BulkSet writes at once, capping
+// in-flight syscalls / open descriptors while still parallelizing the I/O.
+const bulkWriteConcurrency = 16
+
+// BulkSet writes multiple entities under a single table lock. Key files are written
+// concurrently (each key is an independent file), then the shared SK index files are
+// consolidated — each written exactly once. It is not atomic: on failure, entities
+// already written remain persisted.
+func (d *Db) BulkSet(ctx context.Context, table string, entities []item.Entity) error {
+	d.tbmu.Lock(table)
+	defer d.tbmu.Unlock(table)
+
+	// Collapse duplicate keys (last wins): two goroutines writing the same key file
+	// would race, and last-write-wins matches the old sequential behavior.
+	entities = dedupeByKey(entities)
+
+	if err := d.writeKeyFilesConcurrent(ctx, table, entities); err != nil {
+		return err
+	}
+
+	return d.bulkUpdateSk(table, entities)
+}
+
+// writeKeyFilesConcurrent fans the per-key writes across a bounded goroutine pool and
+// returns the first error, cancelling the remaining dispatches.
+func (d *Db) writeKeyFilesConcurrent(ctx context.Context, table string, entities []item.Entity) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, bulkWriteConcurrency)
+	var wg sync.WaitGroup
+	var once sync.Once
+	var firstErr error
+
+dispatch:
+	for i, data := range entities {
+		select {
+		case <-ctx.Done():
+			break dispatch // an earlier write failed; stop scheduling more.
+		case sem <- struct{}{}:
+			wg.Add(1)
+			go func(i int, data item.Entity) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				if err := d.writeKeyFile(table, data); err != nil {
+					once.Do(func() {
+						firstErr = fmt.Errorf("bulk set entity %d (key %q): %w", i, data.Key, err)
+						cancel()
+					})
+				}
+			}(i, data)
+		}
+	}
+
+	wg.Wait()
+	return firstErr
+}
+
+// bulkUpdateSk groups every entity by SK and rewrites each SK index file once, instead
+// of a read-modify-write per item. SK files are shared across entities, so this runs
+// after the parallel key writes — never concurrently for the same sk.
+func (d *Db) bulkUpdateSk(table string, entities []item.Entity) error {
+	order := make([]string, 0)
+	bySK := make(map[string][]string)
+	for _, e := range entities {
+		if e.SK == "" {
+			continue
+		}
+		if _, seen := bySK[e.SK]; !seen {
+			order = append(order, e.SK)
+		}
+		bySK[e.SK] = append(bySK[e.SK], e.Key)
+	}
+
+	for _, sk := range order {
+		if err := d.appendKeysToSk(table, sk, bySK[sk]...); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// dedupeByKey returns entities with duplicate keys collapsed to their last occurrence,
+// preserving first-seen order.
+func dedupeByKey(entities []item.Entity) []item.Entity {
+	idx := make(map[string]int, len(entities))
+	out := make([]item.Entity, 0, len(entities))
+	for _, e := range entities {
+		if i, ok := idx[e.Key]; ok {
+			out[i] = e
+			continue
+		}
+		idx[e.Key] = len(out)
+		out = append(out, e)
+	}
+	return out
+}
+
+// setLocked performs a single Set without acquiring the table lock; callers must hold it.
+func (d *Db) setLocked(table string, data item.Entity) error {
+	if err := d.writeKeyFile(table, data); err != nil {
+		return err
+	}
+
+	if data.SK != "" {
+		return d.appendKeysToSk(table, data.SK, data.Key)
+	}
+
+	return nil
+}
+
+// writeKeyFile persists one entity to its key file. Key files are independent (one file
+// per key), so concurrent callers writing distinct keys never race.
+func (d *Db) writeKeyFile(table string, data item.Entity) error {
 	// Entity.Value may be map[interface{}]interface{} after CBOR decoding; encoding/json rejects that.
 	data.Value = jsonSafeAny(data.Value)
 
@@ -68,31 +186,44 @@ func (d *Db) Set(ctx context.Context, table string, data item.Entity) error {
 		return fmt.Errorf("write put key file: %w", err)
 	}
 
-	if data.SK != "" {
-		path = filepath.Join(d.defaultDir, table, "sk", data.SK)
+	return nil
+}
 
-		keys, err := d.getKeys(table, data.SK)
-		if errors.Is(err, db.ErrNotFoundSk) || os.IsNotExist(err) {
-			keys = []string{}
-			err = nil
-		}
-		if err != nil {
-			return fmt.Errorf("get keys: %w", err)
-		}
+// appendKeysToSk merges keys into the SK index file, reading and rewriting it once. An
+// SK file is shared by every entity with the same SK, so it must never be written
+// concurrently for the same sk.
+func (d *Db) appendKeysToSk(table, sk string, newKeys ...string) error {
+	keys, err := d.getKeys(table, sk)
+	if errors.Is(err, db.ErrNotFoundSk) || os.IsNotExist(err) {
+		keys = []string{}
+		err = nil
+	}
+	if err != nil {
+		return fmt.Errorf("get keys: %w", err)
+	}
 
-		if !slices.Contains(keys, data.Key) {
-			keys = append(keys, data.Key)
-			kb, err := json.Marshal(keys)
-			if err != nil {
-				return fmt.Errorf("marshal keys: %w", err)
-			}
-			if err := os.WriteFile(path, kb, 0644); err != nil {
-				if writeBlockedByMissingPath(err) {
-					return db.ErrTableNotFound
-				}
-				return fmt.Errorf("write put sk file: %w", err)
-			}
+	changed := false
+	for _, k := range newKeys {
+		if !slices.Contains(keys, k) {
+			keys = append(keys, k)
+			changed = true
 		}
+	}
+	if !changed {
+		return nil
+	}
+
+	kb, err := json.Marshal(keys)
+	if err != nil {
+		return fmt.Errorf("marshal keys: %w", err)
+	}
+
+	path := filepath.Join(d.defaultDir, table, "sk", sk)
+	if err := os.WriteFile(path, kb, 0644); err != nil {
+		if writeBlockedByMissingPath(err) {
+			return db.ErrTableNotFound
+		}
+		return fmt.Errorf("write put sk file: %w", err)
 	}
 
 	return nil

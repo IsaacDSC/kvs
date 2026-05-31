@@ -12,6 +12,7 @@ import (
 type ReplicateDb interface {
 	CreateTable(tableName string) error
 	ApplyReplicated(ctx context.Context, tableName string, it dto.Item) error
+	ApplyReplicatedBulk(ctx context.Context, tableName string, its dto.Items) error
 	ApplyReplicatedDelete(ctx context.Context, tableName string, it dto.DeleteItem) error
 }
 
@@ -51,6 +52,8 @@ func GrpcHandle(l Log, database ReplicateDb, raftNode RaftNode) func(ctx context
 			return database.CreateTable(entry.Data.TableName)
 		case commands.SetCmd, commands.OptimisticSetCmd:
 			return database.ApplyReplicated(ctx, entry.Data.TableName, entry.Data.Item)
+		case commands.BulkPutCmd:
+			return database.ApplyReplicatedBulk(ctx, entry.Data.TableName, entry.Data.Items)
 		case commands.DeleteCmd, commands.OptimisticDelCmd:
 			return database.ApplyReplicatedDelete(ctx, entry.Data.TableName, entry.Data.Item.DelItem())
 		}

@@ -36,6 +36,16 @@ func (m *mockDB) Set(_ context.Context, table string, entity item.Entity) error 
 	return nil
 }
 
+func (m *mockDB) BulkSet(_ context.Context, table string, entities []item.Entity) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, entity := range entities {
+		m.keys[m.k(table, entity.Key)] = entity
+		m.ops = append(m.ops, fmt.Sprintf("set:%s:%s", table, entity.Key))
+	}
+	return nil
+}
+
 func (m *mockDB) Get(_ context.Context, table, key string) (item.Entity, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
