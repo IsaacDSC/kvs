@@ -2,6 +2,7 @@ package fsdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -69,6 +70,15 @@ func (m *mockDB) Del(_ context.Context, table, key string) error {
 	}
 	delete(m.keys, k)
 	m.ops = append(m.ops, fmt.Sprintf("del:%s:%s", table, key))
+	return nil
+}
+
+func (m *mockDB) BulkDel(ctx context.Context, table string, keys []string) error {
+	for _, key := range keys {
+		if err := m.Del(ctx, table, key); err != nil && !errors.Is(err, db.ErrNotFound) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -147,6 +157,76 @@ func TestWriteBatcher_setDelSetInterleave(t *testing.T) {
 	}
 	if inner2.setCount() != 1 || inner2.delCount() != 0 {
 		t.Fatalf("Del then Set should end as Set, ops=%v", inner2.opSummary())
+	}
+}
+
+// BulkDel coalesces with pending Sets (LWW tombstone) and tolerates keys the inner
+// store never had — the flush treats ErrNotFound as success.
+func TestWriteBatcher_bulkDelCoalescesAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	inner := newMockDB()
+	_ = inner.Set(ctx, "t", item.Entity{Key: "k1", Value: "v"}) // pre-existing on disk
+	b := NewWriteBatcher(inner, WriteBatcherOptions{DeferWrites: true})
+
+	_ = b.Set(ctx, "t", item.Entity{Key: "k2", Value: "x"}) // pending, never reaches inner
+	if err := b.BulkDel(ctx, "t", []string{"k1", "k2", "ghost"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// k1: real delete; k2: Set coalesced into a no-op delete; ghost: idempotent no-op.
+	if inner.delCount() != 1 {
+		t.Fatalf("want 1 inner Del, ops=%v", inner.opSummary())
+	}
+	if inner.setCount() != 1 {
+		t.Fatalf("pending Set k2 must be coalesced away, ops=%v", inner.opSummary())
+	}
+	if _, err := b.Get(ctx, "t", "k1"); err == nil {
+		t.Fatal("k1 must be gone after flush")
+	}
+}
+
+// Without DeferWrites, BulkDel flushes before returning (Option B passthrough).
+func TestWriteBatcher_bulkDelSyncModeFlushesImmediately(t *testing.T) {
+	ctx := context.Background()
+	inner := newMockDB()
+	_ = inner.Set(ctx, "t", item.Entity{Key: "k", Value: 1})
+	b := NewWriteBatcher(inner, WriteBatcherOptions{}) // DeferWrites false
+
+	if err := b.BulkDel(ctx, "t", []string{"k"}); err != nil {
+		t.Fatal(err)
+	}
+	if inner.delCount() != 1 {
+		t.Fatalf("sync mode should flush the delete, ops=%v", inner.opSummary())
+	}
+}
+
+// BulkDel counts toward the dirty-keys limit and triggers the deferred flush.
+func TestWriteBatcher_bulkDelTriggersMaxKeysFlush(t *testing.T) {
+	ctx := context.Background()
+	inner := newMockDB()
+	b := NewWriteBatcher(inner, WriteBatcherOptions{
+		DeferWrites:   true,
+		MaxDirtyKeys:  3,
+		MaxDirtyBytes: 1 << 30,
+	})
+
+	_ = b.Set(ctx, "t", item.Entity{Key: "k1", Value: 1})
+	if len(inner.opSummary()) != 0 {
+		t.Fatalf("unexpected early flush: %v", inner.opSummary())
+	}
+	if err := b.BulkDel(ctx, "t", []string{"k2", "k3"}); err != nil {
+		t.Fatal(err)
+	}
+	// 3 dirty merge keys reached: everything flushed (k1 set; k2/k3 no-op deletes).
+	if inner.setCount() != 1 {
+		t.Fatalf("expected flush of pending Set, ops=%v", inner.opSummary())
+	}
+	keys, _ := b.PendingDirty()
+	if keys != 0 {
+		t.Fatalf("pending keys = %d, want 0 after limit-triggered flush", keys)
 	}
 }
 

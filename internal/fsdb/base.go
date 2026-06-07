@@ -138,6 +138,110 @@ func (d *Db) bulkUpdateSk(table string, entities []item.Entity) error {
 	return nil
 }
 
+// BulkDel removes multiple keys under a single table lock. Missing keys are
+// skipped (idempotent). Key files are removed concurrently, then the shared SK
+// index files are consolidated — each rewritten exactly once. It is not atomic:
+// on failure, keys already removed stay removed.
+func (d *Db) BulkDel(ctx context.Context, table string, keys []string) error {
+	d.tbmu.Lock(table)
+	defer d.tbmu.Unlock(table)
+
+	keys = dedupeKeys(keys)
+
+	// Resolve each key's SK before removing anything: the SK is only known by
+	// reading the key file. Missing keys drop out of the batch (idempotent delete).
+	victims := make([]item.Entity, 0, len(keys))
+	for _, k := range keys {
+		data, err := d.get(ctx, table, k)
+		if err != nil {
+			continue
+		}
+		victims = append(victims, item.Entity{Key: k, SK: data.SK})
+	}
+
+	if err := d.removeKeyFilesConcurrent(ctx, table, victims); err != nil {
+		return err
+	}
+
+	return d.bulkRemoveSk(table, victims)
+}
+
+// removeKeyFilesConcurrent fans the per-key removals across a bounded goroutine pool
+// and returns the first error, cancelling the remaining dispatches. A file already
+// gone is treated as success (benign race with checkpoints/retries).
+func (d *Db) removeKeyFilesConcurrent(ctx context.Context, table string, victims []item.Entity) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, bulkWriteConcurrency)
+	var wg sync.WaitGroup
+	var once sync.Once
+	var firstErr error
+
+dispatch:
+	for i, data := range victims {
+		select {
+		case <-ctx.Done():
+			break dispatch // an earlier removal failed; stop scheduling more.
+		case sem <- struct{}{}:
+			wg.Add(1)
+			go func(i int, key string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				path := filepath.Join(d.defaultDir, table, "key", key)
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					once.Do(func() {
+						firstErr = fmt.Errorf("bulk del entity %d (key %q): %w", i, key, err)
+						cancel()
+					})
+				}
+			}(i, data.Key)
+		}
+	}
+
+	wg.Wait()
+	return firstErr
+}
+
+// bulkRemoveSk groups the removed keys by SK and rewrites each SK index file once.
+// SK files are shared across entities, so this runs after the parallel key removals —
+// never concurrently for the same sk.
+func (d *Db) bulkRemoveSk(table string, victims []item.Entity) error {
+	order := make([]string, 0)
+	bySK := make(map[string][]string)
+	for _, v := range victims {
+		if v.SK == "" {
+			continue
+		}
+		if _, seen := bySK[v.SK]; !seen {
+			order = append(order, v.SK)
+		}
+		bySK[v.SK] = append(bySK[v.SK], v.Key)
+	}
+
+	for _, sk := range order {
+		if err := d.removeKeysFromSk(table, sk, bySK[sk]...); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// dedupeKeys returns keys with duplicates collapsed, preserving first-seen order.
+func dedupeKeys(keys []string) []string {
+	seen := make(map[string]struct{}, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	return out
+}
+
 // dedupeByKey returns entities with duplicate keys collapsed to their last occurrence,
 // preserving first-seen order.
 func dedupeByKey(entities []item.Entity) []item.Entity {
@@ -328,32 +432,48 @@ func (d *Db) Del(ctx context.Context, table string, key string) error {
 	}
 
 	if data.SK != "" {
-		keys, err := d.getKeys(table, data.SK)
-		if err != nil {
+		// Del's historical contract: a missing/unreadable SK index for an entity
+		// that declared an SK surfaces as ErrNotFoundSk.
+		if _, err := d.getKeys(table, data.SK); err != nil {
 			return db.ErrNotFoundSk
 		}
+		return d.removeKeysFromSk(table, data.SK, key)
+	}
 
-		keys = slices.DeleteFunc(keys, func(k string) bool {
-			return k == key
-		})
+	return nil
+}
 
-		path = filepath.Join(d.defaultDir, table, "sk", data.SK)
+// removeKeysFromSk drops gone keys from the SK index file, rewriting it once; an
+// emptied index is removed. A missing index file is treated as already clean.
+func (d *Db) removeKeysFromSk(table, sk string, gone ...string) error {
+	keys, err := d.getKeys(table, sk)
+	if errors.Is(err, db.ErrNotFoundSk) || os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get keys: %w", err)
+	}
 
-		if len(keys) == 0 {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("remove sk file: %w", err)
-			}
-			return nil
+	keys = slices.DeleteFunc(keys, func(k string) bool {
+		return slices.Contains(gone, k)
+	})
+
+	path := filepath.Join(d.defaultDir, table, "sk", sk)
+
+	if len(keys) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove sk file: %w", err)
 		}
+		return nil
+	}
 
-		kb, err := json.Marshal(keys)
-		if err != nil {
-			return fmt.Errorf("marshal keys: %w", err)
-		}
+	kb, err := json.Marshal(keys)
+	if err != nil {
+		return fmt.Errorf("marshal keys: %w", err)
+	}
 
-		if err := os.WriteFile(path, kb, 0644); err != nil {
-			return fmt.Errorf("write put sk file: %w", err)
-		}
+	if err := os.WriteFile(path, kb, 0644); err != nil {
+		return fmt.Errorf("write put sk file: %w", err)
 	}
 
 	return nil

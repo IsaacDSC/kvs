@@ -16,12 +16,15 @@ type Cache[T item.Entity] interface {
 	Once(key string, fn func() (T, error)) (T, error)
 	DelIfOk(key string, fn func() error) error
 	SaveIfOk(key string, value T, fn func() error) error
+	// Del evicts key if present; a missing key is a no-op and never an error.
+	Del(key string)
 }
 
 type DB interface {
 	CreateTable(tableName string) error
 	Set(ctx context.Context, tableName string, entity item.Entity) error
 	BulkSet(ctx context.Context, tableName string, entities []item.Entity) error
+	BulkDel(ctx context.Context, tableName string, keys []string) error
 	Get(ctx context.Context, tableName string, key string) (item.Entity, error)
 	GetBySk(ctx context.Context, tableName string, secondaryKey string) ([]item.Entity, error)
 	Del(ctx context.Context, tableName string, key string) error
@@ -30,6 +33,7 @@ type DB interface {
 type LogDb interface {
 	Set(ctx context.Context, tableName string, entity item.Entity) error
 	BulkSet(ctx context.Context, tableName string, entities []item.Entity) error
+	BulkDelete(ctx context.Context, tableName string, keys []string) error
 	Delete(ctx context.Context, tableName string, key string) error
 	Load(ctx context.Context, operations ...commands.Operations) error
 	Close() error
@@ -161,6 +165,48 @@ func (f *Adapter) ApplyReplicatedBulk(ctx context.Context, tableName string, its
 
 	if err := f.store.BulkSet(ctx, tableName, entities); err != nil {
 		return fmt.Errorf("db: bulk put entity (replicated): %w", err)
+	}
+
+	return nil
+}
+
+// BulkDel deletes the whole batch through the WAL, then the store, then evicts the
+// deleted keys from the in-memory cache. There is no optimistic-lock validation on
+// the bulk path; missing keys are skipped by the store (idempotent delete).
+func (f *Adapter) BulkDel(ctx context.Context, tableName string, its dto.DeleteItems) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.bulkDelLocked(ctx, tableName, its, "")
+}
+
+// ApplyReplicatedBulkDelete applies a committed Raft bulk-delete entry on a follower.
+// See ApplyReplicated for the rationale (no consistency validation on replay).
+func (f *Adapter) ApplyReplicatedBulkDelete(ctx context.Context, tableName string, its dto.DeleteItems) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.bulkDelLocked(ctx, tableName, its, " (replicated)")
+}
+
+// bulkDelLocked is the shared body of BulkDel and ApplyReplicatedBulkDelete: the bulk
+// path never validates versions, so leader and follower run the same sequence
+// (log → disk → memory); suffix only distinguishes the error context.
+func (f *Adapter) bulkDelLocked(ctx context.Context, tableName string, its dto.DeleteItems, suffix string) error {
+	keys := its.Keys()
+
+	if err := f.logdb.BulkDelete(ctx, tableName, keys); err != nil {
+		return fmt.Errorf("db: wal bulk delete%s: %w", suffix, err)
+	}
+
+	if err := f.store.BulkDel(ctx, tableName, keys); err != nil {
+		return fmt.Errorf("db: bulk delete entity%s: %w", suffix, err)
+	}
+
+	// One store call for N keys: evict each from the memdb after the disk delete
+	// succeeded so reads never serve a deleted item. Eviction never fails the batch.
+	for _, k := range keys {
+		f.cache.Del(f.key(k))
 	}
 
 	return nil

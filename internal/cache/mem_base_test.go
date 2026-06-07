@@ -220,6 +220,40 @@ func TestCacheDelIfOk(t *testing.T) {
 	}
 }
 
+func TestCacheDel(t *testing.T) {
+	tests := []struct {
+		name  string
+		limit int
+		step  func(t *testing.T, c *cache.Cache[int])
+	}{
+		{
+			name:  "evicts present key",
+			limit: 2,
+			step: func(t *testing.T, c *cache.Cache[int]) {
+				mustOnceMiss(t, c, "k", 1)
+				c.Del("k")
+				mustAbsent(t, c, "k")
+			},
+		},
+		{
+			name:  "missing key is a no-op",
+			limit: 2,
+			step: func(t *testing.T, c *cache.Cache[int]) {
+				mustOnceMiss(t, c, "a", 1)
+				c.Del("ghost")
+				mustOnceHit(t, c, "a", 1)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := cache.New[int](tt.limit, 0)
+			tt.step(t, c)
+		})
+	}
+}
+
 func TestCacheConcurrentOnceAndSaveIfOk(t *testing.T) {
 	const (
 		goroutines = 32

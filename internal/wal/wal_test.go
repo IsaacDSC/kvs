@@ -151,6 +151,53 @@ func TestLoad_fullReplayWhenNoCheckpointDir(t *testing.T) {
 	}
 }
 
+// BulkDelete appends one OpDel per key with monotonic sequence numbers, and a full
+// replay applies them — including OpDel for keys the store never had (idempotent).
+func TestBulkDelete_appendsAndReplays(t *testing.T) {
+	ctx := context.Background()
+	codec := code.NewCBOR()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+	w, err := New(walPath, Options{Durability: SyncEveryWrite}, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab := "t"
+	if err := w.BulkSet(ctx, tab, []item.Entity{
+		{Key: "a", Value: "1"},
+		{Key: "b", Value: "2"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// "ghost" never existed: the OpDel entry must not fail the later replay.
+	if err := w.BulkDelete(ctx, tab, []string{"a", "ghost"}); err != nil {
+		t.Fatal(err)
+	}
+	if w.seq != 4 {
+		t.Fatalf("seq = %d, want 4 (2 sets + 2 deletes)", w.seq)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	w2, err := New(walPath, Options{Durability: SyncEveryWrite}, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+
+	dbInst := fsdb.NewDb(filepath.Join(dir, "fs"))
+	if err := w2.Load(ctx, dbInst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbInst.Get(ctx, tab, "a"); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("key a must be deleted after replay, got %v", err)
+	}
+	if _, err := dbInst.Get(ctx, tab, "b"); err != nil {
+		t.Fatalf("key b must survive replay, got %v", err)
+	}
+}
+
 func TestCheckpoint_requiresDir(t *testing.T) {
 	w, err := New(filepath.Join(t.TempDir(), "x.wal"), Options{Durability: SyncEveryWrite}, code.NewCBOR())
 	if err != nil {

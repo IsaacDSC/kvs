@@ -65,10 +65,20 @@ func (m *memStore) Del(_ context.Context, table, key string) error {
 	return nil
 }
 
+func (m *memStore) BulkDel(ctx context.Context, table string, keys []string) error {
+	for _, k := range keys {
+		if err := m.Del(ctx, table, k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type memLog struct {
-	sets       int
-	deletes    int
-	bulkSetErr error
+	sets          int
+	deletes       int
+	bulkSetErr    error
+	bulkDeleteErr error
 }
 
 func (l *memLog) Set(_ context.Context, _ string, _ item.Entity) error {
@@ -86,6 +96,14 @@ func (l *memLog) BulkSet(_ context.Context, _ string, entities []item.Entity) er
 
 func (l *memLog) Delete(_ context.Context, _ string, _ string) error {
 	l.deletes++
+	return nil
+}
+
+func (l *memLog) BulkDelete(_ context.Context, _ string, keys []string) error {
+	if l.bulkDeleteErr != nil {
+		return l.bulkDeleteErr
+	}
+	l.deletes += len(keys)
 	return nil
 }
 
@@ -229,6 +247,89 @@ func TestApplyReplicatedBulk_writesBatchToWALThenStore(t *testing.T) {
 	}
 	if got2.SK != "s" {
 		t.Fatalf("k2 sk=%q want %q", got2.SK, "s")
+	}
+}
+
+// BulkDel must evict every previously cached key of the batch so reads do not
+// return ghosts, and append the whole batch to the WAL before touching the store.
+func TestBulkDel_deletesBatchAndEvictsCache(t *testing.T) {
+	store := newMemStore()
+	_ = store.CreateTable("t")
+	_ = store.Set(context.Background(), "t", item.Entity{Key: "k1", Value: "v1"})
+	_ = store.Set(context.Background(), "t", item.Entity{Key: "k2", Value: "v2"})
+
+	log := &memLog{}
+	cc := cache.New[item.Entity](8, 0)
+	adapter := New(store, log, cc)
+
+	// Warm the cache for both keys.
+	for _, k := range []string{"k1", "k2"} {
+		if _, err := adapter.Get(context.Background(), "t", k); err != nil {
+			t.Fatalf("Get warm cache %s: %v", k, err)
+		}
+	}
+
+	its := dto.DeleteItems{{Key: "k1"}, {Key: "k2"}}
+	if err := adapter.BulkDel(context.Background(), "t", its); err != nil {
+		t.Fatalf("BulkDel: %v", err)
+	}
+
+	if log.deletes != 2 {
+		t.Fatalf("expected 2 WAL delete appends, got %d", log.deletes)
+	}
+	for _, k := range []string{"k1", "k2"} {
+		if _, err := adapter.Get(context.Background(), "t", k); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Get %s after BulkDel: want ErrNotFound, got %v", k, err)
+		}
+	}
+}
+
+// A WAL failure must abort BulkDel before any key is removed from the store.
+func TestBulkDel_walErrorSkipsStore(t *testing.T) {
+	store := newMemStore()
+	_ = store.CreateTable("t")
+	_ = store.Set(context.Background(), "t", item.Entity{Key: "k1", Value: "v1"})
+
+	log := &memLog{bulkDeleteErr: errors.New("wal unavailable")}
+	cc := cache.New[item.Entity](8, 0)
+	adapter := New(store, log, cc)
+
+	its := dto.DeleteItems{{Key: "k1"}}
+	if err := adapter.BulkDel(context.Background(), "t", its); err == nil {
+		t.Fatal("expected error from WAL, got nil")
+	}
+
+	if _, err := store.Get(context.Background(), "t", "k1"); err != nil {
+		t.Fatalf("store must be untouched after WAL failure, got %v", err)
+	}
+}
+
+// ApplyReplicatedBulkDelete applies the batch on a follower (same sequence as the
+// leader) and tolerates keys missing from the store (idempotent catch-up replay).
+func TestApplyReplicatedBulkDelete_appliesAndIsIdempotent(t *testing.T) {
+	store := newMemStore()
+	_ = store.CreateTable("t")
+	_ = store.Set(context.Background(), "t", item.Entity{Key: "k1", Value: "v1"})
+
+	log := &memLog{}
+	cc := cache.New[item.Entity](8, 0)
+	adapter := New(store, log, cc)
+
+	// k2 never existed: the bulk path skips it without failing the batch.
+	its := dto.DeleteItems{{Key: "k1"}, {Key: "k2"}}
+	if err := adapter.ApplyReplicatedBulkDelete(context.Background(), "t", its); err != nil {
+		t.Fatalf("ApplyReplicatedBulkDelete: %v", err)
+	}
+	if log.deletes != 2 {
+		t.Fatalf("expected 2 WAL delete appends, got %d", log.deletes)
+	}
+
+	// Replaying the same batch must succeed (idempotent).
+	if err := adapter.ApplyReplicatedBulkDelete(context.Background(), "t", its); err != nil {
+		t.Fatalf("ApplyReplicatedBulkDelete replay: %v", err)
+	}
+	if _, err := store.Get(context.Background(), "t", "k1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("k1 must be gone, got %v", err)
 	}
 }
 

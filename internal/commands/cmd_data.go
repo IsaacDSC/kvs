@@ -10,7 +10,7 @@ type Data struct {
 	Cmd       Commands  `json:"cmd"`
 	TableName string    `json:"table_name"`
 	Item      dto.Item  `json:"item"`            // optional; used by single-item commands
-	Items     dto.Items `json:"items,omitempty"` // optional; used by BulkPutCmd
+	Items     dto.Items `json:"items,omitempty"` // optional; used by BulkPutCmd and BulkDelCmd
 	// MinAcks quorum required to commit THIS log entry (HTTP ?raft_min_acks / JSON raft_min_acks).
 	// Omit or zero is normalized at the HTTP boundary to replication by every member (N); other
 	// ProposeCommand callers that leave MinAcks at 0 defer to Raft (effective default = full cluster).

@@ -273,6 +273,27 @@ func (b *WriteBatcher) BulkSet(ctx context.Context, tableName string, entities [
 	return b.flushAllLocked(ctx)
 }
 
+// BulkDel enqueues one tombstone per key under a single lock; the LWW merge gives a
+// pending Set followed by BulkDel the final delete effect. On flush, a key already
+// missing from the inner store counts as success (idempotent batch delete).
+func (b *WriteBatcher) BulkDel(ctx context.Context, tableName string, keys []string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for _, key := range keys {
+		mk := mergeKey{table: tableName, key: key}
+		b.upsertLocked(mk, batchOp{kind: batchOpDel})
+	}
+
+	if b.opts.DeferWrites {
+		if b.overLimitsLocked() {
+			return b.flushAllLocked(ctx)
+		}
+		return nil
+	}
+	return b.flushAllLocked(ctx)
+}
+
 func (b *WriteBatcher) Del(ctx context.Context, tableName string, key string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

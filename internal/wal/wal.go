@@ -107,6 +107,31 @@ func (w *WAL) BulkSet(ctx context.Context, tableName string, entities []item.Ent
 	return w.maybeAutoCheckpointLocked()
 }
 
+// BulkDelete appends one OpDel entry per key under a single lock, assigning
+// monotonically increasing sequence numbers, then evaluates the auto-checkpoint
+// policy once. On append failure, w.seq reflects the entries already written.
+func (w *WAL) BulkDelete(ctx context.Context, tableName string, keys []string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	seq := w.seq
+	for _, key := range keys {
+		seq++
+		if err := w.appendLocked(Entry{
+			Seq:   seq,
+			Op:    OpDel,
+			Table: tableName,
+			Key:   key,
+		}); err != nil {
+			w.seq = seq - 1
+			return fmt.Errorf("wal: append: %w", err)
+		}
+		w.seq = seq
+	}
+
+	return w.maybeAutoCheckpointLocked()
+}
+
 func (w *WAL) Delete(ctx context.Context, tableName string, key string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -170,7 +195,9 @@ func (w *WAL) Load(ctx context.Context, operations ...commands.Operations) error
 			}
 			return nil
 		case OpDel:
-			if err := ops.Del(ctx, e.Table, e.Key); err != nil {
+			// A missing key is fine: the delete may already be materialized on the
+			// store (checkpoint ahead of this entry) or the key never reached disk.
+			if err := ops.Del(ctx, e.Table, e.Key); err != nil && !errors.Is(err, db.ErrNotFound) {
 				return fmt.Errorf("WAL.Load.db: del: %w", err)
 			}
 			return nil

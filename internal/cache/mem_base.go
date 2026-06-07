@@ -121,6 +121,17 @@ func (c *Cache[T]) Once(key string, fn func() (T, error)) (T, error) {
 	return v, nil
 }
 
+// Del evicts key from the cache if present. A missing key is a no-op: cache
+// invalidation is best-effort and never reports an error to the caller.
+func (c *Cache[T]) Del(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if elem, ok := c.items[key]; ok {
+		c.removeElement(elem)
+	}
+}
+
 // DelIfOk runs fn while holding the lock; on success it evicts key from the cache.
 // On failure it returns the error and leaves the cache unchanged.
 func (c *Cache[T]) DelIfOk(key string, fn func() error) error {

@@ -51,6 +51,16 @@ func (i Item) Entity() item.Entity {
 	return ent
 }
 
+// DelItems converts items replicated through the Raft log back into the bulk
+// delete flow (the inverse of DeleteItems.Items).
+func (is Items) DelItems() DeleteItems {
+	out := make(DeleteItems, len(is))
+	for i, it := range is {
+		out[i] = it.DelItem()
+	}
+	return out
+}
+
 func (i Item) DelItem() DeleteItem {
 	return DeleteItem{
 		Key:     i.Key,
