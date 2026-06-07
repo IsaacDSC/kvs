@@ -106,6 +106,7 @@ func main() {
 		api.PingHandler(),
 		api.CreateTableHandler(database, raftNode.Node),
 		api.PutHandler(database, raftNode.Node),
+		api.BulkPutHandle(database, raftNode.Node),
 		api.DeleteHandler(database, raftNode.Node),
 		api.GetHandler(database),
 		api.GetBySecondaryKeyHandler(database),

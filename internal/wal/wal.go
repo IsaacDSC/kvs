@@ -74,6 +74,39 @@ func (w *WAL) Set(ctx context.Context, tableName string, entity item.Entity) err
 	return w.maybeAutoCheckpointLocked()
 }
 
+// BulkSet appends one OpSet entry per entity under a single lock, assigning
+// monotonically increasing sequence numbers, then evaluates the auto-checkpoint
+// policy once. On append failure, w.seq reflects the entries already written.
+func (w *WAL) BulkSet(ctx context.Context, tableName string, entities []item.Entity) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	seq := w.seq
+	for _, entity := range entities {
+		b, err := w.codec.Encode(entity)
+		if err != nil {
+			w.seq = seq
+			return fmt.Errorf("wal: encode: %w", err)
+		}
+
+		seq++
+		if err := w.appendLocked(Entry{
+			Seq:        seq,
+			Op:         OpSet,
+			Table:      tableName,
+			Key:        entity.Key,
+			Fk:         entity.SK,
+			ValueBytes: b,
+		}); err != nil {
+			w.seq = seq - 1
+			return fmt.Errorf("wal: append: %w", err)
+		}
+		w.seq = seq
+	}
+
+	return w.maybeAutoCheckpointLocked()
+}
+
 func (w *WAL) Delete(ctx context.Context, tableName string, key string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()

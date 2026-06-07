@@ -21,6 +21,7 @@ type Cache[T item.Entity] interface {
 type DB interface {
 	CreateTable(tableName string) error
 	Set(ctx context.Context, tableName string, entity item.Entity) error
+	BulkSet(ctx context.Context, tableName string, entities []item.Entity) error
 	Get(ctx context.Context, tableName string, key string) (item.Entity, error)
 	GetBySk(ctx context.Context, tableName string, secondaryKey string) ([]item.Entity, error)
 	Del(ctx context.Context, tableName string, key string) error
@@ -28,6 +29,7 @@ type DB interface {
 
 type LogDb interface {
 	Set(ctx context.Context, tableName string, entity item.Entity) error
+	BulkSet(ctx context.Context, tableName string, entities []item.Entity) error
 	Delete(ctx context.Context, tableName string, key string) error
 	Load(ctx context.Context, operations ...commands.Operations) error
 	Close() error
@@ -53,6 +55,24 @@ func (f *Adapter) CreateTable(table string) error {
 	defer f.mu.Unlock()
 
 	return f.store.CreateTable(table)
+}
+
+func (f *Adapter) BulkSet(ctx context.Context, tableName string, its dto.Items) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	entities := its.Entities()
+
+	if err := f.logdb.BulkSet(ctx, tableName, entities); err != nil {
+		return fmt.Errorf("db: wal set: %w", err)
+	}
+
+	if err := f.store.BulkSet(ctx, tableName, entities); err != nil {
+		return fmt.Errorf("db: put entity: %w", err)
+	}
+
+	return nil
+
 }
 
 func (f *Adapter) Set(ctx context.Context, tableName string, it dto.Item) error {
@@ -124,6 +144,26 @@ func (f *Adapter) ApplyReplicated(ctx context.Context, tableName string, it dto.
 		return nil
 	})
 
+}
+
+// ApplyReplicatedBulk applies a committed Raft bulk-put entry on a follower. Like
+// ApplyReplicated, it bypasses validateConsistency (the leader already enforced any
+// preconditions before proposing) and writes the whole batch through the WAL then the store.
+func (f *Adapter) ApplyReplicatedBulk(ctx context.Context, tableName string, its dto.Items) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	entities := its.Entities()
+
+	if err := f.logdb.BulkSet(ctx, tableName, entities); err != nil {
+		return fmt.Errorf("db: wal bulk set (replicated): %w", err)
+	}
+
+	if err := f.store.BulkSet(ctx, tableName, entities); err != nil {
+		return fmt.Errorf("db: bulk put entity (replicated): %w", err)
+	}
+
+	return nil
 }
 
 // ApplyReplicatedDelete applies a committed Raft delete unconditionally on a follower.

@@ -253,6 +253,26 @@ func (b *WriteBatcher) Set(ctx context.Context, tableName string, entity item.En
 	return b.flushAllLocked(ctx)
 }
 
+func (b *WriteBatcher) BulkSet(ctx context.Context, tableName string, entities []item.Entity) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for _, entity := range entities {
+		mk := mergeKey{table: tableName, key: entity.Key}
+		b.upsertLocked(mk, batchOp{kind: batchOpSet, entity: entity})
+	}
+
+	if b.opts.DeferWrites {
+		if b.overLimitsLocked() {
+			if err := b.flushAllLocked(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return b.flushAllLocked(ctx)
+}
+
 func (b *WriteBatcher) Del(ctx context.Context, tableName string, key string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

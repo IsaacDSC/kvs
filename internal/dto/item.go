@@ -7,6 +7,26 @@ import (
 	"github.com/IsaacDSC/kvs/internal/item"
 )
 
+type Items []Item
+
+func (is Items) Validate() *FieldError {
+	for _, i := range is {
+		if err := i.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (is Items) Entities() []item.Entity {
+	output := make([]item.Entity, len(is))
+	for idx, i := range is {
+		output[idx] = i.Entity()
+	}
+
+	return output
+}
+
 type Item struct {
 	Key     string         `json:"key"`
 	SK      string         `json:"sk"`
