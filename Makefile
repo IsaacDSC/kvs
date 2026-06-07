@@ -1,4 +1,4 @@
-.PHONY: help proto build run-single-node run1 run2 run3 state1 state2 state3 propose
+.PHONY: help proto build test cursor-agent-stop run-single-node run1 run2 run3 state1 state2 state3 propose
 
 # Alvo padrão: exibe a ajuda
 .DEFAULT_GOAL := help
@@ -88,6 +88,20 @@ propose:
 test:
 	go test ./... -race
 
+# Hook Cursor (`stop`): descarta JSON do stdin, roda build + test com race; se falhar,
+# imprime JSON com followup_message para o agente continuar corrigindo (ver .cursor/hooks.json).
+cursor-agent-stop:
+	@cat >/dev/null; \
+	if ! o=$$(go build ./... 2>&1); then \
+		jq -n --arg msg "$$(printf '%s\n\n%s' 'go build ./... falhou. Corrija os erros de compilação.' "$$o")" '{followup_message:$$msg}'; \
+		exit 0; \
+	fi; \
+	if ! o=$$(go test -race ./... 2>&1); then \
+		jq -n --arg msg "$$(printf '%s\n\n%s' 'go test -race ./... falhou. Corrija testes ou condições de corrida.' "$$o")" '{followup_message:$$msg}'; \
+		exit 0; \
+	fi; \
+	echo '{}'
+
 help:
 	@echo "Comandos disponíveis:"
 	@echo "  make build          - Compila o projeto (go build ./...)"
@@ -101,5 +115,6 @@ help:
 	@echo "  make state3         - Mostra /state do node3 (requer jq)"
 	@echo "  make propose        - POST /cmd/propose (ADDR=... CMD=...)"
 	@echo "  make proto  - Gera código Go e gRPC a partir de proto/raft/raft.proto"
-	@echo "  make test   - Executa o testes com mode race para garantir que não tem race-condition"
+	@echo "  make test            - Executa testes com -race"
+	@echo "  make cursor-agent-stop - Usado pelo hook Cursor ao parar o agente (build + test -race)"
 	@echo "  make help   - Mostra esta ajuda (é o alvo padrão ao rodar 'make' sem argumentos)"
